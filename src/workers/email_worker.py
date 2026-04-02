@@ -1,12 +1,11 @@
 """
-Email registration worker — creates Rambler email accounts and stores them in the DB.
+Email worker — buys email accounts from NotLetters API and stores them in the DB.
 
-Runs in a loop, creating accounts as needed to maintain a pool of fresh emails.
+No browser needed — pure API calls. Maintains a pool of fresh emails for account registration.
 """
 
 import logging
-from ..browser.browser_manager import BrowserManager
-from ..browser.rambler_actions import register_rambler_email
+from ..api.notletters import NotLettersClient
 from ..db.repository import Repository
 from ..config_manager import load_config
 from .base_worker import BaseWorker
@@ -15,24 +14,35 @@ log = logging.getLogger(__name__)
 
 
 class EmailWorker(BaseWorker):
-    def __init__(self, worker_id: str, browser_manager: BrowserManager, repo: Repository,
-                 proxy: dict | None = None, min_pool_size: int = 5):
-        super().__init__(worker_id, name=f"EmailReg-{worker_id}")
-        self.browser = browser_manager
+    def __init__(self, worker_id: str, repo: Repository, min_pool_size: int = 5):
+        super().__init__(worker_id, name=f"EmailBuyer-{worker_id}")
         self.repo = repo
-        self.proxy = proxy
         self.min_pool_size = min_pool_size
+        self.client: NotLettersClient | None = None
 
     def work(self):
         cfg = load_config()
-        rambler_url = cfg["rambler"]["base_url"]
+        token = cfg.get("notletters", {}).get("api_token", "")
+        if not token:
+            self._emit_status("NotLetters API token not configured!")
+            return
+
+        self.client = NotLettersClient(token)
+        email_type = cfg.get("notletters", {}).get("email_type", 0)
+        batch_size = cfg.get("notletters", {}).get("batch_size", 3)
+
+        # Log balance on start
+        try:
+            info = self.client.get_balance()
+            self._emit_status(f"NotLetters balance: {info['balance']}")
+        except Exception as e:
+            self._emit_status(f"Failed to check balance: {e}")
 
         while not self.should_stop:
             self.wait_if_paused()
             if self.should_stop:
                 break
 
-            # Check how many fresh emails we have
             stats = self.repo.get_stats()
             fresh = stats["fresh_emails"]
 
@@ -41,23 +51,16 @@ class EmailWorker(BaseWorker):
                 self._stop_event.wait(timeout=30)
                 continue
 
-            self._emit_status(f"Registering new email (pool: {fresh}/{self.min_pool_size})...")
+            need = min(batch_size, self.min_pool_size - fresh)
+            self._emit_status(f"Buying {need} emails (pool: {fresh}/{self.min_pool_size})...")
 
-            ctx = self.browser.create_context(proxy=self.proxy)
             try:
-                result = register_rambler_email(ctx, rambler_url)
-                if result:
-                    self.repo.add_email(result["email"], result["password"])
-                    self._emit_status(f"Registered: {result['email']}")
-                else:
-                    self._emit_status("Email registration failed — retrying...")
-                    self._stop_event.wait(timeout=15)
+                emails = self.client.buy_emails(count=need, type_email=email_type)
+                for em in emails:
+                    self.repo.add_email(em.email, em.password)
+                    log.info(f"Added email: {em.email}")
+                self._emit_status(f"Bought {len(emails)} emails")
             except Exception as e:
-                self.log.error(f"Email registration error: {e}")
-                self._emit_status(f"Error: {e}")
-                self._stop_event.wait(timeout=15)
-            finally:
-                try:
-                    ctx.close()
-                except Exception:
-                    pass
+                self.log.error(f"Email purchase failed: {e}")
+                self._emit_status(f"Purchase error: {e}")
+                self._stop_event.wait(timeout=30)

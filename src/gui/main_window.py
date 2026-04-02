@@ -5,8 +5,8 @@ import logging
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTabWidget,
     QPushButton, QLabel, QTextEdit, QTableWidget, QTableWidgetItem,
-    QGroupBox, QFormLayout, QLineEdit, QSpinBox, QListWidget,
-    QHeaderView, QSplitter, QMessageBox, QPlainTextEdit,
+    QGroupBox, QFormLayout, QLineEdit, QSpinBox, QListWidget, QComboBox,
+    QHeaderView, QSplitter, QMessageBox, QPlainTextEdit, QScrollArea,
 )
 from PySide6.QtCore import Qt, QTimer, Signal, QObject
 from PySide6.QtGui import QColor
@@ -147,6 +147,20 @@ class MainWindow(QMainWindow):
         tags_layout.addRow("Record tags:", self.cfg_rec_tags)
         layout.addWidget(tags_group)
 
+        # NotLetters
+        nl_group = QGroupBox("NotLetters (Email Provider)")
+        nl_layout = QFormLayout(nl_group)
+        self.cfg_nl_token = QLineEdit()
+        self.cfg_nl_token.setPlaceholderText("API token from notletters.com")
+        self.cfg_nl_token.setEchoMode(QLineEdit.Password)
+        self.cfg_nl_email_type = QComboBox()
+        self.cfg_nl_email_type.addItems(["Limited (0)", "Unlimited (1)", "RU zone (2)", "Personal (3)"])
+        self.cfg_nl_batch = QSpinBox(); self.cfg_nl_batch.setRange(1, 20)
+        nl_layout.addRow("API Token:", self.cfg_nl_token)
+        nl_layout.addRow("Email type:", self.cfg_nl_email_type)
+        nl_layout.addRow("Batch size:", self.cfg_nl_batch)
+        layout.addWidget(nl_group)
+
         # Proxy
         proxy_group = QGroupBox("Proxy")
         pl = QVBoxLayout(proxy_group)
@@ -198,6 +212,11 @@ class MainWindow(QMainWindow):
         proxies = cfg["proxy"].get("list", [])
         self.cfg_proxy_list.setPlainText("\n".join(proxies))
 
+        nl = cfg.get("notletters", {})
+        self.cfg_nl_token.setText(nl.get("api_token", ""))
+        self.cfg_nl_email_type.setCurrentIndex(nl.get("email_type", 0))
+        self.cfg_nl_batch.setValue(nl.get("batch_size", 3))
+
     def _ui_to_config(self) -> dict:
         proxy_lines = [l.strip() for l in self.cfg_proxy_list.toPlainText().strip().split("\n") if l.strip()]
         return {
@@ -222,8 +241,10 @@ class MainWindow(QMainWindow):
                 "enabled": len(proxy_lines) > 0,
                 "list": proxy_lines,
             },
-            "rambler": {
-                "base_url": "https://id.rambler.ru/login-20/mail-registration",
+            "notletters": {
+                "api_token": self.cfg_nl_token.text().strip(),
+                "email_type": self.cfg_nl_email_type.currentIndex(),
+                "batch_size": self.cfg_nl_batch.value(),
             },
         }
 

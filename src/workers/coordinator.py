@@ -63,10 +63,10 @@ class WorkerCoordinator:
         log.info("Starting browser...")
         self.browser_manager.start()
 
-        # Start email registration worker(s)
+        # Start email buyer worker(s) — pure API, no browser needed
         for i in range(cfg["workers"].get("email_reg_count", 1)):
             wid = f"email-{i}"
-            w = EmailWorker(wid, self.browser_manager, self.repo, proxy=self._get_proxy(100 + i))
+            w = EmailWorker(wid, self.repo)
             if self._status_callback:
                 w.add_status_callback(self._status_callback)
             self.workers.append(w)
