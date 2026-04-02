@@ -1,22 +1,20 @@
 """
-Parser worker — scans tracker category pages, extracts tags, downloads matching torrents.
+Parser worker — all-in-one: takes email → registers on tracker → parses → downloads.
 
-State machine per worker:
-  NEED_LOGIN → LOGIN → SCAN_PAGE → PROCESS_TOPIC → DOWNLOAD → (repeat)
-                                                        ↓
-                                              NEED_RELOGIN (limit hit)
-                                                        ↓
-                                                    LOGIN (new account, same topic queue)
+Flow per cycle:
+  1. Claim fresh email from DB (thread-safe, no two workers get the same one)
+  2. Register new tracker account using that email (with CAPTCHA via Telegram)
+  3. Log in to the tracker
+  4. Scan pages, extract tags, download matching torrents
+  5. When download limit hit → go to step 1 with new email
+  6. Topic queue and page position survive account switches
 
-Key design:
-- Page number and topic queue are stored in worker memory (Python state)
-- Account switch only replaces browser context + session, NOT the topic queue
-- After re-login, worker continues from the exact topic where it stopped
-- Page claiming is coordinated via DB (thread-safe)
+Each worker runs in its own visible browser window for debugging.
 """
 
 import logging
-from enum import Enum, auto
+import random
+import string
 from pathlib import Path
 from playwright.sync_api import BrowserContext
 
@@ -24,21 +22,22 @@ from .base_worker import BaseWorker
 from ..db.repository import Repository
 from ..browser.browser_manager import BrowserManager
 from ..browser.tracker_actions import (
-    login, get_topic_list, extract_topic_details,
+    login, register_on_tracker, get_topic_list, extract_topic_details,
     download_torrent_file, download_cover_image, human_delay,
 )
 from ..browser.tracker_profiles import get_profile, TrackerProfile
+from ..api.telegram_captcha import TelegramCaptchaSolver
 from ..config_manager import load_config, get_download_dir
 
 log = logging.getLogger(__name__)
 
 
-class ParserState(Enum):
-    NEED_LOGIN = auto()
-    SCANNING = auto()
-    PROCESSING = auto()
-    NEED_RELOGIN = auto()
-    DONE = auto()
+def _random_username(length=10) -> str:
+    return "".join(random.choices(string.ascii_lowercase + string.digits, k=length))
+
+
+def _random_password(length=12) -> str:
+    return "".join(random.choices(string.ascii_letters + string.digits, k=length)) + "!"
 
 
 class ParserWorker(BaseWorker):
@@ -50,32 +49,25 @@ class ParserWorker(BaseWorker):
         self.proxy = proxy
         self.ctx: BrowserContext | None = None
         self.page = None
-        self.current_account = None
         self.downloads_remaining = 0
+        self.captcha_solver: TelegramCaptchaSolver | None = None
 
-        # Current work state — survives account switches
+        # Current email being used
+        self._current_email_id: int | None = None
+
+        # State that survives account switches
         self._current_page_num: int | None = None
-        self._topic_queue: list[dict] = []  # topics left to process on current page
-        self._pending_download: dict | None = None  # topic waiting for download after relogin
+        self._topic_queue: list[dict] = []
+        self._pending_download: dict | None = None
 
-    # ── Account & Login ─────────────────────────────────────────
+    # ── Account lifecycle: email → register → login ─────────────
 
-    def _acquire_account(self) -> bool:
-        """Get a fresh tracker account from DB. Returns True if got one."""
-        account = self.repo.get_fresh_tracker_account()
-        if not account:
-            return False
-        self.current_account = account
-        self.downloads_remaining = account.max_downloads - account.downloads_count
-        return True
-
-    def _login(self, cfg: dict, profile: TrackerProfile) -> bool:
+    def _new_account_cycle(self, cfg: dict, profile: TrackerProfile) -> bool:
         """
-        Create new browser context and log in.
-        Does NOT touch _topic_queue or _current_page_num — state is preserved.
-        Returns True on success.
+        Full cycle: take email from DB → register on tracker → log in.
+        Returns True on success. Email is marked IN_USE atomically (thread-safe).
         """
-        # Close old context
+        # Close old browser context
         if self.ctx:
             try:
                 self.ctx.close()
@@ -84,57 +76,90 @@ class ParserWorker(BaseWorker):
             self.ctx = None
             self.page = None
 
-        self.ctx = self.browser.create_context(proxy=self.proxy)
-
-        try:
-            self.page = login(
-                self.ctx,
-                profile,
-                self.current_account.username,
-                self.current_account.password,
-            )
-            self._emit_status(f"[{profile.name}] Logged in as {self.current_account.username} ({self.downloads_remaining} downloads left)")
-            return True
-        except Exception as e:
-            self.log.error(f"Login failed for {self.current_account.username}: {e}")
-            self.repo.exhaust_tracker_account(self.current_account.id)
-            self.current_account = None
-            self._emit_status(f"Login failed: {e}")
+        # 1. Get fresh email (thread-safe — claimed atomically)
+        email = self.repo.get_fresh_email()
+        if not email:
+            self._emit_status("No fresh emails — add more in the Emails tab!")
             return False
 
-    def _ensure_logged_in(self, cfg: dict, profile: TrackerProfile) -> bool:
-        """
-        Make sure we have a working session.
-        Tries to get account + login in a loop until success or stop.
-        """
+        self._current_email_id = email.id
+        self._emit_status(f"Using email: {email.email}")
+
+        # 2. Create browser context (visible window, unique fingerprint)
+        self.ctx = self.browser.create_context(proxy=self.proxy)
+
+        # Set window title so user can identify which worker is which
+        first_page = self.ctx.new_page()
+        first_page.evaluate(f"document.title = 'Worker: {self.worker_id}'")
+
+        # 3. Register on tracker
+        username = _random_username()
+        password = _random_password()
+
+        self._emit_status(f"[{profile.name}] Registering {username} with {email.email}...")
+        success = register_on_tracker(
+            self.ctx, profile, username, password, email.email,
+            captcha_solver=self.captcha_solver,
+            worker_id=self.worker_id,
+            status_callback=self._emit_status,
+        )
+
+        first_page.close()
+
+        if not success:
+            self._emit_status(f"Registration failed for {email.email}")
+            self.repo.mark_email_used(email.id)
+            try:
+                self.ctx.close()
+            except Exception:
+                pass
+            self.ctx = None
+            return False
+
+        # 4. Log in with new account
+        self._emit_status(f"[{profile.name}] Logging in as {username}...")
+        try:
+            self.page = login(self.ctx, profile, username, password)
+        except Exception as e:
+            self.log.error(f"Login failed after registration: {e}")
+            self._emit_status(f"Login failed: {e}")
+            self.repo.mark_email_used(email.id)
+            try:
+                self.ctx.close()
+            except Exception:
+                pass
+            self.ctx = None
+            return False
+
+        # Set page title for identification
+        try:
+            self.page.evaluate(f"document.title = '{self.worker_id} | {username} | ' + document.title")
+        except Exception:
+            pass
+
+        self.downloads_remaining = cfg["tracker"]["max_downloads_per_account"]
+        self.repo.mark_email_used(email.id)
+        self._emit_status(f"Ready: {username} ({self.downloads_remaining} downloads)")
+        return True
+
+    def _ensure_account(self, cfg: dict, profile: TrackerProfile) -> bool:
+        """Ensure we have a working logged-in session. Retry loop."""
+        if self.page is not None and self.downloads_remaining > 0:
+            return True
+
         while not self.should_stop:
-            if self.current_account is None:
-                self._emit_status("Getting fresh account...")
-                if not self._acquire_account():
-                    self._emit_status("No accounts available — waiting...")
-                    self._stop_event.wait(timeout=10)
-                    continue
-
-            if self.page is not None:
-                return True  # already logged in
-
-            self._emit_status(f"Logging in as {self.current_account.username}...")
-            if self._login(cfg, profile):
+            if self._new_account_cycle(cfg, profile):
                 return True
-            # Login failed — account was marked exhausted, loop will try next
+            self._emit_status("Retrying in 15s...")
+            self._stop_event.wait(timeout=15)
         return False
 
     def _switch_account(self, cfg: dict, profile: TrackerProfile) -> bool:
-        """
-        Switch to a new account. Called when download limit is hit.
-        Preserves _topic_queue and _current_page_num.
-        """
-        self._emit_status("Download limit reached — switching account...")
-        if self.current_account:
-            self.repo.exhaust_tracker_account(self.current_account.id)
-        self.current_account = None
-        self.page = None  # force re-login in _ensure_logged_in
-        return self._ensure_logged_in(cfg, profile)
+        """Switch to new email+account when download limit hit. Preserves topic queue."""
+        self._emit_status("Download limit reached — getting new email...")
+        self.page = None
+        self.downloads_remaining = 0
+        return self._ensure_account(cfg, profile)
 
     # ── Main work loop ──────────────────────────────────────────
 
@@ -147,12 +172,17 @@ class ParserWorker(BaseWorker):
         record_tags = cfg["tags"]["record_tags"]
         download_dir = get_download_dir(cfg)
 
+        # Init Telegram captcha solver
+        tg = cfg.get("telegram", {})
+        if tg.get("bot_token") and tg.get("chat_id"):
+            self.captcha_solver = TelegramCaptchaSolver(tg["bot_token"], tg["chat_id"])
+
         if not category_id:
             self._emit_status("No category ID configured")
             return
 
-        # Initial login
-        if not self._ensure_logged_in(cfg, profile):
+        # Get first account
+        if not self._ensure_account(cfg, profile):
             return
 
         while not self.should_stop:
@@ -160,7 +190,7 @@ class ParserWorker(BaseWorker):
             if self.should_stop:
                 break
 
-            # ── Handle pending download after account switch ────
+            # Handle pending download after account switch
             if self._pending_download:
                 topic = self._pending_download
                 self._pending_download = None
@@ -172,7 +202,7 @@ class ParserWorker(BaseWorker):
                     continue
                 continue
 
-            # ── Get next page if queue is empty ─────────────────
+            # Get next page if queue is empty
             if not self._topic_queue:
                 if self._current_page_num is not None:
                     self.repo.complete_page(category_id, self._current_page_num, self.worker_id)
@@ -180,17 +210,12 @@ class ParserWorker(BaseWorker):
 
                 self._current_page_num = self.repo.claim_next_page(category_id, self.worker_id)
                 if self._current_page_num is None:
-                    self._emit_status("All pages processed")
+                    self._emit_status("All pages processed!")
                     break
 
                 self._emit_status(f"Scanning page {self._current_page_num}...")
                 try:
-                    topics = get_topic_list(
-                        self.page,
-                        profile,
-                        category_id,
-                        self._current_page_num,
-                    )
+                    topics = get_topic_list(self.page, profile, category_id, self._current_page_num)
                     self._topic_queue = list(topics)
                     self._emit_status(f"Page {self._current_page_num}: {len(topics)} topics")
                 except Exception as e:
@@ -200,44 +225,34 @@ class ParserWorker(BaseWorker):
                     self._current_page_num = None
                     continue
 
-            # ── Process next topic from queue ───────────────────
+            # Process next topic
             if self._topic_queue:
                 topic = self._topic_queue.pop(0)
-                self._process_single_topic(cfg, profile, topic, category_id, download_tags, record_tags, download_dir)
+                self._process_topic(cfg, profile, topic, category_id, download_tags, record_tags, download_dir)
 
         # Cleanup
         if self._current_page_num is not None and self._topic_queue:
-            # Didn't finish this page — release it so another worker can take it
             self.repo.release_page(category_id, self.worker_id)
-
         if self.ctx:
             try:
                 self.ctx.close()
             except Exception:
                 pass
 
-    # ── Single topic processing ─────────────────────────────────
+    # ── Topic processing ────────────────────────────────────────
 
-    def _process_single_topic(self, cfg, profile, topic, category_id, download_tags, record_tags, download_dir):
-        """Process one topic: extract details, optionally download."""
+    def _process_topic(self, cfg, profile, topic, category_id, download_tags, record_tags, download_dir):
         topic_id = topic["topic_id"]
         title = topic["title"]
 
-        # Skip duplicates
         t = self.repo.add_torrent(topic_id, title, category_id, self._current_page_num)
         if t is None:
-            return  # already in DB
+            return
 
         self._emit_status(f"Topic {topic_id}: {title[:50]}...")
 
         try:
-            details = extract_topic_details(
-                self.page,
-                profile,
-                topic_id,
-                download_tags,
-                record_tags,
-            )
+            details = extract_topic_details(self.page, profile, topic_id, download_tags, record_tags)
         except Exception as e:
             self.log.error(f"Failed to extract topic {topic_id}: {e}")
             self.repo.mark_torrent_error(topic_id)
@@ -251,17 +266,11 @@ class ParserWorker(BaseWorker):
             details["cover_url"],
         )
 
-        # Download if matching tags
         if details["matched_download_tags"]:
             if self.downloads_remaining <= 0:
-                # Save topic for after relogin
-                self._pending_download = {
-                    "topic_id": topic_id,
-                    "cover_url": details["cover_url"],
-                }
+                self._pending_download = {"topic_id": topic_id, "cover_url": details["cover_url"]}
                 if not self._switch_account(cfg, profile):
                     return
-                # Will be handled in main loop via _pending_download
                 return
 
             self._do_download(cfg, profile, topic_id, details["cover_url"], download_dir)
@@ -269,9 +278,6 @@ class ParserWorker(BaseWorker):
         human_delay(0.5, 1.5)
 
     def _do_download(self, cfg, profile, topic_id, cover_url, download_dir) -> bool:
-        """
-        Download a torrent file. Returns True on success, False if limit hit.
-        """
         if self.downloads_remaining <= 0:
             return False
 
@@ -282,12 +288,10 @@ class ParserWorker(BaseWorker):
         if file_path:
             cover_path = download_cover_image(self.page, cover_url, download_dir, topic_id)
             self.repo.mark_torrent_downloaded(topic_id, file_path, cover_path)
-
             self.downloads_remaining -= 1
-            self.repo.increment_download(self.current_account.id)
             self._emit_status(f"Downloaded {topic_id} ({self.downloads_remaining} left)")
             return True
         else:
             self.repo.mark_torrent_error(topic_id)
             self._emit_status(f"Download failed: {topic_id}")
-            return True  # failed but not because of limit
+            return True

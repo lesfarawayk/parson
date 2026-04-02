@@ -51,6 +51,46 @@ class Repository:
                 acc.status = AccountStatus.EXHAUSTED
                 s.commit()
 
+    def import_emails(self, lines: list[str]) -> int:
+        """
+        Bulk import emails from login:password lines.
+        Skips duplicates. Returns count of newly added.
+        """
+        added = 0
+        with _lock:
+            s = self._session()
+            for line in lines:
+                line = line.strip()
+                if not line or ":" not in line:
+                    continue
+                email, password = line.split(":", 1)
+                email = email.strip()
+                password = password.strip()
+                if not email or not password:
+                    continue
+                existing = s.query(EmailAccount).filter(EmailAccount.email == email).first()
+                if existing:
+                    continue
+                s.add(EmailAccount(email=email, password=password, status=AccountStatus.FRESH))
+                added += 1
+            s.commit()
+        return added
+
+    def get_all_emails(self) -> list[dict]:
+        """Get all emails with their status for GUI display."""
+        with _lock:
+            s = self._session()
+            emails = s.query(EmailAccount).order_by(EmailAccount.id).all()
+            return [
+                {
+                    "id": e.id,
+                    "email": e.email,
+                    "status": e.status.value,
+                    "created_at": str(e.created_at) if e.created_at else "",
+                }
+                for e in emails
+            ]
+
     # ── Tracker Accounts ────────────────────────────────────────
 
     def add_tracker_account(self, username: str, password: str, email_id: int) -> TrackerAccount:

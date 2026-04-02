@@ -72,6 +72,7 @@ class MainWindow(QMainWindow):
         # Tabs
         tabs = QTabWidget()
         tabs.addTab(self._build_dashboard_tab(), "Dashboard")
+        tabs.addTab(self._build_emails_tab(), "Emails")
         tabs.addTab(self._build_config_tab(), "Settings")
         tabs.addTab(self._build_log_tab(), "Log")
         layout.addWidget(tabs)
@@ -105,6 +106,92 @@ class MainWindow(QMainWindow):
         layout.addWidget(splitter)
         return w
 
+    # ── Emails tab ──────────────────────────────────────────────
+
+    def _build_emails_tab(self) -> QWidget:
+        w = QWidget()
+        layout = QVBoxLayout(w)
+
+        # Import area
+        import_group = QGroupBox("Import Emails (login:password, one per line)")
+        il = QVBoxLayout(import_group)
+        self.email_input = QTextEdit()
+        self.email_input.setPlaceholderText(
+            "user1@mail.com:password123\n"
+            "user2@outlook.com:pass456\n"
+            "user3@gmail.com:pass789"
+        )
+        self.email_input.setMaximumHeight(150)
+        il.addWidget(self.email_input)
+
+        btn_row = QHBoxLayout()
+        self.btn_import_emails = QPushButton("Import")
+        self.btn_import_emails.clicked.connect(self._on_import_emails)
+        self.lbl_import_result = QLabel("")
+        btn_row.addWidget(self.btn_import_emails)
+        btn_row.addWidget(self.lbl_import_result)
+        btn_row.addStretch()
+        il.addLayout(btn_row)
+        layout.addWidget(import_group)
+
+        # Email list table
+        list_group = QGroupBox("Email Accounts")
+        ll = QVBoxLayout(list_group)
+
+        btn_refresh = QPushButton("Refresh")
+        btn_refresh.clicked.connect(self._refresh_email_table)
+        ll.addWidget(btn_refresh)
+
+        self.email_table = QTableWidget(0, 3)
+        self.email_table.setHorizontalHeaderLabels(["Email", "Status", "Added"])
+        self.email_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.email_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        ll.addWidget(self.email_table)
+
+        layout.addWidget(list_group)
+        return w
+
+    def _on_import_emails(self):
+        text = self.email_input.toPlainText()
+        lines = text.strip().split("\n")
+        if not lines or not text.strip():
+            self.lbl_import_result.setText("Nothing to import")
+            return
+        count = self.coordinator.repo.import_emails(lines)
+        self.lbl_import_result.setText(f"Imported {count} new emails")
+        self.email_input.clear()
+        self._refresh_email_table()
+
+    def _refresh_email_table(self):
+        emails = self.coordinator.repo.get_all_emails()
+        self.email_table.setRowCount(len(emails))
+        for row, e in enumerate(emails):
+            email_item = QTableWidgetItem(e["email"])
+            status_item = QTableWidgetItem(e["status"])
+            date_item = QTableWidgetItem(e["created_at"])
+
+            # Color and strikethrough for used emails
+            status = e["status"]
+            if status == "exhausted":
+                color = QColor(220, 220, 220)
+                font = email_item.font()
+                font.setStrikeOut(True)
+                email_item.setFont(font)
+                status_item.setFont(font)
+            elif status == "in_use":
+                color = QColor(255, 255, 200)
+            elif status == "fresh":
+                color = QColor(200, 255, 200)
+            else:
+                color = QColor(255, 200, 200)
+
+            for item in (email_item, status_item, date_item):
+                item.setBackground(color)
+
+            self.email_table.setItem(row, 0, email_item)
+            self.email_table.setItem(row, 1, status_item)
+            self.email_table.setItem(row, 2, date_item)
+
     # ── Config tab ──────────────────────────────────────────────
 
     def _build_config_tab(self) -> QWidget:
@@ -136,10 +223,8 @@ class MainWindow(QMainWindow):
         workers_group = QGroupBox("Workers")
         wl = QFormLayout(workers_group)
         self.cfg_parser_count = QSpinBox(); self.cfg_parser_count.setRange(1, 20)
-        self.cfg_email_count = QSpinBox(); self.cfg_email_count.setRange(0, 5)
         self.cfg_download_dir = QLineEdit()
         wl.addRow("Parser workers:", self.cfg_parser_count)
-        wl.addRow("Email reg workers:", self.cfg_email_count)
         wl.addRow("Download dir:", self.cfg_download_dir)
         layout.addWidget(workers_group)
 
@@ -234,7 +319,7 @@ class MainWindow(QMainWindow):
         self.cfg_max_dl.setValue(cfg["tracker"]["max_downloads_per_account"])
 
         self.cfg_parser_count.setValue(cfg["workers"]["parser_count"])
-        self.cfg_email_count.setValue(cfg["workers"]["email_reg_count"])
+        # email_reg_count removed — parser workers handle registration themselves
         self.cfg_download_dir.setText(cfg["workers"]["download_dir"])
 
         self.cfg_dl_tags.setText(", ".join(cfg["tags"]["download_tags"]))
@@ -264,7 +349,6 @@ class MainWindow(QMainWindow):
             },
             "workers": {
                 "parser_count": self.cfg_parser_count.value(),
-                "email_reg_count": self.cfg_email_count.value(),
                 "download_dir": self.cfg_download_dir.text().strip() or "downloads",
             },
             "tags": {
@@ -369,6 +453,8 @@ class MainWindow(QMainWindow):
                 f"Pages done: {stats['pages_completed']}"
             )
             self.lbl_stats.setText(text)
+            # Auto-refresh email table every cycle
+            self._refresh_email_table()
         except Exception:
             pass
 

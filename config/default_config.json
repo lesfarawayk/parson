@@ -8,7 +8,6 @@
     },
     "workers": {
         "parser_count": 3,
-        "email_reg_count": 1,
         "download_dir": "downloads"
     },
     "proxy": {
