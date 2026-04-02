@@ -1,4 +1,7 @@
-"""High-level actions on the tracker site performed via Playwright."""
+"""High-level actions on tracker sites performed via Playwright.
+
+All functions accept a TrackerProfile so they work with any supported tracker.
+"""
 
 import logging
 import re
@@ -7,9 +10,11 @@ import random
 from pathlib import Path
 from playwright.sync_api import BrowserContext, Page
 
+from .tracker_profiles import TrackerProfile
+
 log = logging.getLogger(__name__)
 
-HUMAN_DELAY = (0.5, 2.0)  # seconds range for human-like delays
+HUMAN_DELAY = (0.5, 2.0)
 
 
 def human_delay(low=None, high=None):
@@ -18,101 +23,88 @@ def human_delay(low=None, high=None):
     time.sleep(random.uniform(lo, hi))
 
 
-def login(ctx: BrowserContext, base_url: str, username: str, password: str) -> Page:
+def login(ctx: BrowserContext, profile: TrackerProfile, username: str, password: str) -> Page:
     """Log in to the tracker. Returns the page after successful login."""
     page = ctx.new_page()
-    page.goto(f"{base_url}/forum/login.php", wait_until="domcontentloaded")
+    page.goto(f"{profile.base_url}{profile.login_url}", wait_until="domcontentloaded")
     human_delay()
 
-    page.fill("#login-form-login-user-name, input[name='login_username']", username)
+    page.fill(profile.login_user_sel, username)
     human_delay(0.3, 0.8)
-    page.fill("#login-form-login-password, input[name='login_password']", password)
+    page.fill(profile.login_pass_sel, password)
     human_delay(0.3, 0.8)
-    page.click("#login-form-submit, input[name='login']")
+    page.click(profile.login_submit_sel)
     page.wait_for_load_state("domcontentloaded")
     human_delay()
 
-    log.info(f"Logged in as {username}")
+    log.info(f"[{profile.name}] Logged in as {username}")
     return page
 
 
-def get_topic_list(page: Page, forum_url: str, category_id: str, page_number: int) -> list[dict]:
+def get_topic_list(page: Page, profile: TrackerProfile, category_id: str, page_number: int) -> list[dict]:
     """
     Navigate to category page and extract topic list.
     Returns list of {"topic_id": str, "title": str}.
     """
-    # rutracker pagination: start param = (page-1)*50
-    start = (page_number - 1) * 50
-    url = f"{forum_url}?f={category_id}&start={start}"
+    start = (page_number - 1) * profile.topics_per_page
+    url = f"{profile.forum_url}?f={category_id}&start={start}"
     page.goto(url, wait_until="domcontentloaded")
     human_delay(1.0, 3.0)
 
     topics = []
-    # Topic links in the forum listing
-    rows = page.query_selector_all("tr.hl-tr, tr.t-row")
+    rows = page.query_selector_all(profile.topic_row_sel)
     for row in rows:
-        link = row.query_selector("a.torTopic, a.tt-text, td.t-title a")
+        link = row.query_selector(profile.topic_link_sel)
         if not link:
             continue
         href = link.get_attribute("href") or ""
         title = link.inner_text().strip()
 
-        # Extract topic id from href like viewtopic.php?t=12345
-        match = re.search(r"t=(\d+)", href)
+        match = re.search(profile.topic_id_pattern, href)
         if match:
             topics.append({"topic_id": match.group(1), "title": title})
 
-    log.info(f"Page {page_number}: found {len(topics)} topics")
+    log.info(f"[{profile.name}] Page {page_number}: found {len(topics)} topics")
     return topics
 
 
-def extract_topic_details(page: Page, base_url: str, topic_id: str, download_tags: list, record_tags: list) -> dict:
+def extract_topic_details(page: Page, profile: TrackerProfile, topic_id: str,
+                          download_tags: list, record_tags: list) -> dict:
     """
     Open a topic page, extract description, cover image, and match tags.
-    Returns {
-        "description": str,
-        "cover_url": str | None,
-        "matched_download_tags": list,
-        "matched_record_tags": list,
-    }
     """
-    url = f"{base_url}/forum/viewtopic.php?t={topic_id}"
+    url = f"{profile.base_url}/forum/viewtopic.php?t={topic_id}"
     page.goto(url, wait_until="domcontentloaded")
     human_delay(1.0, 3.0)
 
-    # Get post body
-    post_body = page.query_selector(".post_body, .post-body, #topic_main .post_wrap .post_body")
+    post_body = page.query_selector(profile.post_body_sel)
     description = post_body.inner_text().strip() if post_body else ""
     description_lower = description.lower()
 
-    # Cover image — usually the first image inside the post body
     cover_url = None
     if post_body:
-        img = post_body.query_selector("img, var.postImg")
+        img = post_body.query_selector(profile.cover_img_sel)
         if img:
             cover_url = img.get_attribute("src") or img.get_attribute("title") or None
 
-    # Match tags (case-insensitive)
     matched_dl = [t for t in download_tags if t.lower() in description_lower]
     matched_rec = [t for t in record_tags if t.lower() in description_lower]
 
-    log.info(f"Topic {topic_id}: dl_tags={matched_dl}, rec_tags={matched_rec}")
+    log.info(f"[{profile.name}] Topic {topic_id}: dl_tags={matched_dl}, rec_tags={matched_rec}")
     return {
-        "description": description[:5000],  # truncate for DB
+        "description": description[:5000],
         "cover_url": cover_url,
         "matched_download_tags": matched_dl,
         "matched_record_tags": matched_rec,
     }
 
 
-def download_torrent_file(page: Page, base_url: str, topic_id: str, download_dir: Path) -> str | None:
-    """
-    Download .torrent file from topic page.
-    Returns the saved file path or None on failure.
-    """
+def download_torrent_file(page: Page, profile: TrackerProfile, topic_id: str,
+                          download_dir: Path) -> str | None:
+    """Download .torrent file from topic page. Returns saved path or None."""
     try:
-        # The download link is typically: dl.php?t=<topic_id>
-        dl_url = f"{base_url}/forum/dl.php?t={topic_id}"
+        dl_path = profile.download_url_tpl.format(topic_id=topic_id)
+        dl_url = f"{profile.base_url}{dl_path}"
 
         with page.expect_download(timeout=30000) as dl_info:
             page.goto(dl_url)
@@ -120,10 +112,10 @@ def download_torrent_file(page: Page, base_url: str, topic_id: str, download_dir
         download = dl_info.value
         dest = download_dir / f"{topic_id}.torrent"
         download.save_as(str(dest))
-        log.info(f"Downloaded torrent {topic_id} -> {dest}")
+        log.info(f"[{profile.name}] Downloaded torrent {topic_id} -> {dest}")
         return str(dest)
     except Exception as e:
-        log.error(f"Failed to download torrent {topic_id}: {e}")
+        log.error(f"[{profile.name}] Failed to download torrent {topic_id}: {e}")
         return None
 
 
@@ -144,3 +136,78 @@ def download_cover_image(page: Page, cover_url: str, download_dir: Path, topic_i
     except Exception as e:
         log.warning(f"Failed to download cover for {topic_id}: {e}")
     return None
+
+
+def register_on_tracker(ctx: BrowserContext, profile: TrackerProfile,
+                        username: str, password: str, email: str,
+                        status_callback=None) -> bool:
+    """
+    Register a new account on the tracker.
+    Returns True on success. Handles CAPTCHA by waiting for manual input.
+    """
+    page = ctx.new_page()
+    try:
+        page.goto(f"{profile.base_url}{profile.register_url}", wait_until="domcontentloaded")
+        human_delay(2, 4)
+
+        # Accept rules
+        try:
+            agree_btn = page.query_selector(profile.reg_agree_sel)
+            if agree_btn:
+                agree_btn.click()
+                page.wait_for_load_state("domcontentloaded")
+                human_delay(1, 2)
+        except Exception:
+            pass
+
+        # Fill form
+        page.fill(profile.reg_user_sel, username)
+        human_delay(0.3, 0.8)
+        page.fill(profile.reg_pass_sel, password)
+        human_delay(0.3, 0.8)
+        page.fill(profile.reg_pass_confirm_sel, password)
+        human_delay(0.3, 0.8)
+        page.fill(profile.reg_email_sel, email)
+        human_delay(0.3, 0.8)
+
+        # CAPTCHA — wait for manual solve
+        captcha = page.query_selector(profile.reg_captcha_img_sel)
+        if captcha:
+            if status_callback:
+                status_callback("CAPTCHA — solve it in browser window (90s)...")
+            try:
+                page.wait_for_function(
+                    f"() => document.querySelector('{profile.reg_captcha_input_sel.split(',')[0].strip()}')?.value.length > 3",
+                    timeout=90000,
+                )
+            except Exception:
+                human_delay(5, 10)
+
+        # Submit
+        page.click(profile.reg_submit_sel)
+        page.wait_for_load_state("domcontentloaded")
+        human_delay(2, 4)
+
+        page_text = page.inner_text("body")[:500].lower()
+        success = (
+            "profile.php" in page.url or
+            "login" in page.url.lower() or
+            "подтвер" in page_text or
+            "confirm" in page_text or
+            "актив" in page_text
+        )
+
+        page.close()
+        if success:
+            log.info(f"[{profile.name}] Registered: {username}")
+        else:
+            log.warning(f"[{profile.name}] Registration may have failed for {username}")
+        return success
+
+    except Exception as e:
+        log.error(f"[{profile.name}] Registration error: {e}")
+        try:
+            page.close()
+        except Exception:
+            pass
+        return False

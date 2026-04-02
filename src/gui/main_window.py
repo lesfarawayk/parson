@@ -13,6 +13,7 @@ from PySide6.QtGui import QColor
 
 from ..workers.coordinator import WorkerCoordinator
 from ..config_manager import load_config, save_config
+from ..browser.tracker_profiles import list_profiles, PROFILES
 
 log = logging.getLogger(__name__)
 
@@ -113,12 +114,18 @@ class MainWindow(QMainWindow):
         # Tracker settings
         tracker_group = QGroupBox("Tracker")
         tl = QFormLayout(tracker_group)
-        self.cfg_base_url = QLineEdit()
+        self.cfg_tracker_profile = QComboBox()
+        for name in list_profiles():
+            profile = PROFILES[name]
+            self.cfg_tracker_profile.addItem(f"{profile.name} ({profile.base_url})", name)
+        self.cfg_tracker_url_label = QLabel()
+        self.cfg_tracker_profile.currentIndexChanged.connect(self._on_tracker_profile_changed)
         self.cfg_category_id = QLineEdit()
         self.cfg_pages_start = QSpinBox(); self.cfg_pages_start.setRange(1, 9999)
         self.cfg_pages_end = QSpinBox(); self.cfg_pages_end.setRange(1, 9999)
         self.cfg_max_dl = QSpinBox(); self.cfg_max_dl.setRange(1, 50)
-        tl.addRow("Base URL:", self.cfg_base_url)
+        tl.addRow("Tracker:", self.cfg_tracker_profile)
+        tl.addRow("", self.cfg_tracker_url_label)
         tl.addRow("Category ID:", self.cfg_category_id)
         tl.addRow("Pages start:", self.cfg_pages_start)
         tl.addRow("Pages end:", self.cfg_pages_end)
@@ -192,11 +199,23 @@ class MainWindow(QMainWindow):
 
         return w
 
+    def _on_tracker_profile_changed(self, index):
+        name = self.cfg_tracker_profile.currentData()
+        if name and name in PROFILES:
+            p = PROFILES[name]
+            self.cfg_tracker_url_label.setText(f"URL: {p.base_url}")
+
     # ── Config I/O ──────────────────────────────────────────────
 
     def _load_config_to_ui(self):
         cfg = load_config()
-        self.cfg_base_url.setText(cfg["tracker"]["base_url"])
+        # Set tracker profile dropdown
+        profile_name = cfg["tracker"].get("profile", "rutracker")
+        idx = self.cfg_tracker_profile.findData(profile_name)
+        if idx >= 0:
+            self.cfg_tracker_profile.setCurrentIndex(idx)
+        self._on_tracker_profile_changed(0)
+
         self.cfg_category_id.setText(cfg["tracker"]["category_id"])
         self.cfg_pages_start.setValue(cfg["tracker"]["pages_start"])
         self.cfg_pages_end.setValue(cfg["tracker"]["pages_end"])
@@ -221,8 +240,7 @@ class MainWindow(QMainWindow):
         proxy_lines = [l.strip() for l in self.cfg_proxy_list.toPlainText().strip().split("\n") if l.strip()]
         return {
             "tracker": {
-                "base_url": self.cfg_base_url.text().strip(),
-                "forum_url": self.cfg_base_url.text().strip().rstrip("/") + "/forum/viewforum.php",
+                "profile": self.cfg_tracker_profile.currentData() or "rutracker",
                 "category_id": self.cfg_category_id.text().strip(),
                 "pages_start": self.cfg_pages_start.value(),
                 "pages_end": self.cfg_pages_end.value(),

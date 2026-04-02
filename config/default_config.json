@@ -1,7 +1,6 @@
 {
     "tracker": {
-        "base_url": "https://rutracker.org",
-        "forum_url": "https://rutracker.org/forum/viewforum.php",
+        "profile": "rutracker",
         "category_id": "",
         "pages_start": 1,
         "pages_end": 700,
