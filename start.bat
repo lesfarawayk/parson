@@ -1,8 +1,8 @@
 @echo off
-if exist venv\Scripts\activate.bat (
-    call venv\Scripts\activate.bat
-    python main.py
-) else (
+if not exist "venv\Scripts\python.exe" (
     echo [ERROR] Virtual environment not found. Run install.bat first.
+    pause
+    exit /b 1
 )
+venv\Scripts\python.exe main.py
 pause
