@@ -1,5 +1,7 @@
 @echo off
 setlocal enabledelayedexpansion
+:: Switch to the directory where this script is located
+cd /d "%~dp0"
 echo === Parson Installer ===
 echo.
 
