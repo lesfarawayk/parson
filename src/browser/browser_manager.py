@@ -1,7 +1,8 @@
-"""Browser manager — creates Playwright browser contexts with visible windows and proxy support."""
+"""Browser manager — creates Playwright browser contexts with visible windows, proxy, and fingerprint spoofing."""
 
 import logging
 from playwright.sync_api import sync_playwright, Browser, BrowserContext, Page
+from .fingerprint import generate_fingerprint, build_stealth_script
 
 log = logging.getLogger(__name__)
 
@@ -25,30 +26,34 @@ class BrowserManager:
         )
         log.info("Browser launched (headed mode)")
 
-    def create_context(self, proxy: dict | None = None, user_agent: str | None = None) -> BrowserContext:
+    def create_context(self, proxy: dict | None = None) -> BrowserContext:
         """
-        Create a new isolated browser context.
+        Create a new isolated browser context with a unique fingerprint.
         proxy format: {"server": "http://host:port", "username": "u", "password": "p"}
         """
-        opts = {}
+        fp = generate_fingerprint()
+
+        opts = {
+            "user_agent": fp["user_agent"],
+            "viewport": fp["viewport"],
+            "screen": fp["screen"],
+            "locale": fp["locale"],
+            "timezone_id": fp["timezone_id"],
+            "color_scheme": "light",
+        }
         if proxy:
             opts["proxy"] = proxy
-        if user_agent:
-            opts["user_agent"] = user_agent
-        else:
-            opts["user_agent"] = (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/122.0.0.0 Safari/537.36"
-            )
-        opts["viewport"] = {"width": 1280, "height": 800}
-        opts["locale"] = "ru-RU"
 
         ctx = self._browser.new_context(**opts)
-        # Stealth tweaks
-        ctx.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', { get: () => false });
-        """)
+
+        # Inject stealth + fingerprint overrides before any page loads
+        ctx.add_init_script(build_stealth_script(fp))
+
+        log.info(
+            f"Context created: {fp['user_agent'][:60]}... | "
+            f"{fp['screen']['width']}x{fp['screen']['height']} | "
+            f"{fp['timezone_id']} | {fp['webgl_renderer'][:40]}..."
+        )
         return ctx
 
     def stop(self):
