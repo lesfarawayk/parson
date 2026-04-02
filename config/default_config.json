@@ -1,0 +1,26 @@
+{
+    "tracker": {
+        "base_url": "https://rutracker.org",
+        "forum_url": "https://rutracker.org/forum/viewforum.php",
+        "category_id": "",
+        "pages_start": 1,
+        "pages_end": 700,
+        "max_downloads_per_account": 3
+    },
+    "workers": {
+        "parser_count": 3,
+        "email_reg_count": 1,
+        "download_dir": "downloads"
+    },
+    "proxy": {
+        "enabled": false,
+        "list": []
+    },
+    "tags": {
+        "download_tags": ["4K", "2160p", "UHD", "3840x2160", "3080p", "3000p"],
+        "record_tags": ["военное", "зарубежное", "драма", "комедия", "боевик", "фантастика", "триллер", "ужасы", "мелодрама", "детектив", "приключения", "документальное", "аниме", "мультфильм"]
+    },
+    "rambler": {
+        "base_url": "https://id.rambler.ru/login-20/mail-registration"
+    }
+}
