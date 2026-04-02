@@ -21,6 +21,7 @@ from ..browser.browser_manager import BrowserManager
 from ..browser.tracker_actions import register_on_tracker, human_delay
 from ..browser.tracker_profiles import get_profile, TrackerProfile
 from ..api.notletters import NotLettersClient
+from ..api.telegram_captcha import TelegramCaptchaSolver
 from ..db.repository import Repository
 from ..config_manager import load_config
 
@@ -44,11 +45,18 @@ class AccountWorker(BaseWorker):
         self.proxy = proxy
         self.min_pool_size = min_pool_size
         self.nl_client: NotLettersClient | None = None
+        self.captcha_solver: TelegramCaptchaSolver | None = None
 
     def work(self):
         cfg = load_config()
         tracker_name = cfg["tracker"].get("profile", "rutracker")
         profile = get_profile(tracker_name)
+
+        # Init Telegram captcha solver
+        tg = cfg.get("telegram", {})
+        if tg.get("bot_token") and tg.get("chat_id"):
+            self.captcha_solver = TelegramCaptchaSolver(tg["bot_token"], tg["chat_id"])
+            self._emit_status("Telegram CAPTCHA solver ready")
 
         # Init NotLetters client for reading confirmation emails
         token = cfg.get("notletters", {}).get("api_token", "")
@@ -84,6 +92,8 @@ class AccountWorker(BaseWorker):
 
                 success = register_on_tracker(
                     ctx, profile, username, password, email.email,
+                    captcha_solver=self.captcha_solver,
+                    worker_id=self.worker_id,
                     status_callback=self._emit_status,
                 )
 

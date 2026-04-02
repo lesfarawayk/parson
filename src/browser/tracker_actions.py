@@ -138,12 +138,65 @@ def download_cover_image(page: Page, cover_url: str, download_dir: Path, topic_i
     return None
 
 
+def solve_captcha_on_page(page: Page, profile: TrackerProfile,
+                         captcha_solver=None, worker_id: str = "",
+                         status_callback=None) -> bool:
+    """
+    Detect and solve CAPTCHA on the current page.
+    If captcha_solver (TelegramCaptchaSolver) is provided, screenshots and sends to Telegram.
+    Otherwise waits for manual input in the browser window.
+    Returns True if captcha was handled.
+    """
+    captcha_img = page.query_selector(profile.reg_captcha_img_sel)
+    if not captcha_img:
+        return True  # no captcha
+
+    captcha_input_sel = profile.reg_captcha_input_sel.split(",")[0].strip()
+    captcha_input = page.query_selector(profile.reg_captcha_input_sel)
+
+    if captcha_solver:
+        # Screenshot the captcha image
+        if status_callback:
+            status_callback("CAPTCHA detected — sending to Telegram...")
+        try:
+            screenshot = captcha_img.screenshot()
+            answer = captcha_solver.send_captcha(
+                screenshot, worker_id,
+                context=f"{profile.name} registration",
+            )
+            if answer and captcha_input:
+                captcha_input.fill("")
+                captcha_input.type(answer, delay=random.randint(50, 150))
+                log.info(f"Captcha answer entered: {answer}")
+                return True
+            else:
+                log.warning("No captcha answer received from Telegram")
+                return False
+        except Exception as e:
+            log.error(f"Telegram captcha error: {e}")
+            # Fall through to manual mode
+
+    # Manual mode — wait for user to type in the browser
+    if status_callback:
+        status_callback("CAPTCHA — solve it in browser window (90s)...")
+    try:
+        page.wait_for_function(
+            f"() => document.querySelector('{captcha_input_sel}')?.value.length > 3",
+            timeout=90000,
+        )
+        return True
+    except Exception:
+        return False
+
+
 def register_on_tracker(ctx: BrowserContext, profile: TrackerProfile,
                         username: str, password: str, email: str,
+                        captcha_solver=None, worker_id: str = "",
                         status_callback=None) -> bool:
     """
     Register a new account on the tracker.
-    Returns True on success. Handles CAPTCHA by waiting for manual input.
+    captcha_solver: TelegramCaptchaSolver instance or None (manual mode).
+    Returns True on success.
     """
     page = ctx.new_page()
     try:
@@ -170,18 +223,8 @@ def register_on_tracker(ctx: BrowserContext, profile: TrackerProfile,
         page.fill(profile.reg_email_sel, email)
         human_delay(0.3, 0.8)
 
-        # CAPTCHA — wait for manual solve
-        captcha = page.query_selector(profile.reg_captcha_img_sel)
-        if captcha:
-            if status_callback:
-                status_callback("CAPTCHA — solve it in browser window (90s)...")
-            try:
-                page.wait_for_function(
-                    f"() => document.querySelector('{profile.reg_captcha_input_sel.split(',')[0].strip()}')?.value.length > 3",
-                    timeout=90000,
-                )
-            except Exception:
-                human_delay(5, 10)
+        # CAPTCHA
+        solve_captcha_on_page(page, profile, captcha_solver, worker_id, status_callback)
 
         # Submit
         page.click(profile.reg_submit_sel)

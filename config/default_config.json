@@ -23,5 +23,9 @@
         "api_token": "",
         "email_type": 0,
         "batch_size": 3
+    },
+    "telegram": {
+        "bot_token": "",
+        "chat_id": ""
     }
 }

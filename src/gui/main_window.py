@@ -168,6 +168,18 @@ class MainWindow(QMainWindow):
         nl_layout.addRow("Batch size:", self.cfg_nl_batch)
         layout.addWidget(nl_group)
 
+        # Telegram CAPTCHA
+        tg_group = QGroupBox("Telegram (CAPTCHA Solver)")
+        tg_layout = QFormLayout(tg_group)
+        self.cfg_tg_token = QLineEdit()
+        self.cfg_tg_token.setPlaceholderText("Bot token from @BotFather")
+        self.cfg_tg_token.setEchoMode(QLineEdit.Password)
+        self.cfg_tg_chat_id = QLineEdit()
+        self.cfg_tg_chat_id.setPlaceholderText("Your chat ID (get from @userinfobot)")
+        tg_layout.addRow("Bot Token:", self.cfg_tg_token)
+        tg_layout.addRow("Chat ID:", self.cfg_tg_chat_id)
+        layout.addWidget(tg_group)
+
         # Proxy
         proxy_group = QGroupBox("Proxy")
         pl = QVBoxLayout(proxy_group)
@@ -236,6 +248,10 @@ class MainWindow(QMainWindow):
         self.cfg_nl_email_type.setCurrentIndex(nl.get("email_type", 0))
         self.cfg_nl_batch.setValue(nl.get("batch_size", 3))
 
+        tg = cfg.get("telegram", {})
+        self.cfg_tg_token.setText(tg.get("bot_token", ""))
+        self.cfg_tg_chat_id.setText(tg.get("chat_id", ""))
+
     def _ui_to_config(self) -> dict:
         proxy_lines = [l.strip() for l in self.cfg_proxy_list.toPlainText().strip().split("\n") if l.strip()]
         return {
@@ -263,6 +279,10 @@ class MainWindow(QMainWindow):
                 "api_token": self.cfg_nl_token.text().strip(),
                 "email_type": self.cfg_nl_email_type.currentIndex(),
                 "batch_size": self.cfg_nl_batch.value(),
+            },
+            "telegram": {
+                "bot_token": self.cfg_tg_token.text().strip(),
+                "chat_id": self.cfg_tg_chat_id.text().strip(),
             },
         }
 
