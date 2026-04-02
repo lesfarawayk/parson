@@ -1,17 +1,22 @@
 """
 Parser worker — scans tracker category pages, extracts tags, downloads matching torrents.
 
-Lifecycle per page:
-1. Claim next unclaimed page from DB
-2. Login to tracker (or reuse session)
-3. Open category page, extract topic list
-4. For each topic: open topic, extract tags/description/cover
-5. If download tags match: download .torrent file
-6. If download limit reached: get new account, re-login
-7. Mark page completed, repeat
+State machine per worker:
+  NEED_LOGIN → LOGIN → SCAN_PAGE → PROCESS_TOPIC → DOWNLOAD → (repeat)
+                                                        ↓
+                                              NEED_RELOGIN (limit hit)
+                                                        ↓
+                                                    LOGIN (new account, same topic queue)
+
+Key design:
+- Page number and topic queue are stored in worker memory (Python state)
+- Account switch only replaces browser context + session, NOT the topic queue
+- After re-login, worker continues from the exact topic where it stopped
+- Page claiming is coordinated via DB (thread-safe)
 """
 
 import logging
+from enum import Enum, auto
 from pathlib import Path
 from playwright.sync_api import BrowserContext
 
@@ -27,6 +32,14 @@ from ..config_manager import load_config, get_download_dir
 log = logging.getLogger(__name__)
 
 
+class ParserState(Enum):
+    NEED_LOGIN = auto()
+    SCANNING = auto()
+    PROCESSING = auto()
+    NEED_RELOGIN = auto()
+    DONE = auto()
+
+
 class ParserWorker(BaseWorker):
     def __init__(self, worker_id: str, browser_manager: BrowserManager, repo: Repository,
                  proxy: dict | None = None):
@@ -39,38 +52,90 @@ class ParserWorker(BaseWorker):
         self.current_account = None
         self.downloads_remaining = 0
 
-    def _get_account_and_login(self, cfg: dict) -> bool:
-        """Get a fresh tracker account from DB and log in. Returns True on success."""
+        # Current work state — survives account switches
+        self._current_page_num: int | None = None
+        self._topic_queue: list[dict] = []  # topics left to process on current page
+        self._pending_download: dict | None = None  # topic waiting for download after relogin
+
+    # ── Account & Login ─────────────────────────────────────────
+
+    def _acquire_account(self) -> bool:
+        """Get a fresh tracker account from DB. Returns True if got one."""
         account = self.repo.get_fresh_tracker_account()
         if not account:
-            self._emit_status("No tracker accounts available — waiting...")
             return False
-
         self.current_account = account
         self.downloads_remaining = account.max_downloads - account.downloads_count
+        return True
 
-        # Close old context, create new one
+    def _login(self, cfg: dict) -> bool:
+        """
+        Create new browser context and log in.
+        Does NOT touch _topic_queue or _current_page_num — state is preserved.
+        Returns True on success.
+        """
+        # Close old context
         if self.ctx:
             try:
                 self.ctx.close()
             except Exception:
                 pass
+            self.ctx = None
+            self.page = None
 
         self.ctx = self.browser.create_context(proxy=self.proxy)
+
         try:
             self.page = login(
                 self.ctx,
                 cfg["tracker"]["base_url"],
-                account.username,
-                account.password,
+                self.current_account.username,
+                self.current_account.password,
             )
-            self._emit_status(f"Logged in as {account.username}")
+            self._emit_status(f"Logged in as {self.current_account.username} ({self.downloads_remaining} downloads left)")
             return True
         except Exception as e:
-            self.log.error(f"Login failed for {account.username}: {e}")
-            self.repo.exhaust_tracker_account(account.id)
+            self.log.error(f"Login failed for {self.current_account.username}: {e}")
+            self.repo.exhaust_tracker_account(self.current_account.id)
+            self.current_account = None
             self._emit_status(f"Login failed: {e}")
             return False
+
+    def _ensure_logged_in(self, cfg: dict) -> bool:
+        """
+        Make sure we have a working session.
+        Tries to get account + login in a loop until success or stop.
+        """
+        while not self.should_stop:
+            if self.current_account is None:
+                self._emit_status("Getting fresh account...")
+                if not self._acquire_account():
+                    self._emit_status("No accounts available — waiting...")
+                    self._stop_event.wait(timeout=10)
+                    continue
+
+            if self.page is not None:
+                return True  # already logged in
+
+            self._emit_status(f"Logging in as {self.current_account.username}...")
+            if self._login(cfg):
+                return True
+            # Login failed — account was marked exhausted, loop will try next
+        return False
+
+    def _switch_account(self, cfg: dict) -> bool:
+        """
+        Switch to a new account. Called when download limit is hit.
+        Preserves _topic_queue and _current_page_num.
+        """
+        self._emit_status("Download limit reached — switching account...")
+        if self.current_account:
+            self.repo.exhaust_tracker_account(self.current_account.id)
+        self.current_account = None
+        self.page = None  # force re-login in _ensure_logged_in
+        return self._ensure_logged_in(cfg)
+
+    # ── Main work loop ──────────────────────────────────────────
 
     def work(self):
         cfg = load_config()
@@ -84,66 +149,93 @@ class ParserWorker(BaseWorker):
             return
 
         # Initial login
-        while not self.should_stop:
-            if self._get_account_and_login(cfg):
-                break
-            # Wait and retry
-            self._stop_event.wait(timeout=10)
+        if not self._ensure_logged_in(cfg):
+            return
 
-        # Main loop: process pages
+        # If we had a pending download from before relogin, do it now
+        # (this handles the edge case of restart)
+
+        state = ParserState.SCANNING
+
         while not self.should_stop:
             self.wait_if_paused()
             if self.should_stop:
                 break
 
-            # Claim next page
-            page_num = self.repo.claim_next_page(category_id, self.worker_id)
-            if page_num is None:
-                self._emit_status("All pages processed")
-                break
+            # ── Handle pending download after account switch ────
+            if self._pending_download and state != ParserState.NEED_RELOGIN:
+                topic = self._pending_download
+                self._pending_download = None
+                dl_ok = self._do_download(cfg, topic["topic_id"], topic["cover_url"], download_dir)
+                if not dl_ok:
+                    # Need another account switch
+                    if not self._switch_account(cfg):
+                        break
+                    self._pending_download = topic  # retry after next login
+                    continue
+                continue  # back to processing remaining topics
 
-            self._emit_status(f"Processing page {page_num}")
-            try:
-                self._process_page(cfg, category_id, page_num, download_tags, record_tags, download_dir)
-                self.repo.complete_page(category_id, page_num, self.worker_id)
-                self._emit_status(f"Page {page_num} completed")
-            except Exception as e:
-                self.log.error(f"Error on page {page_num}: {e}")
-                self._emit_status(f"Error on page {page_num}: {e}")
-                self.repo.release_page(category_id, self.worker_id)
+            # ── Get next page if queue is empty ─────────────────
+            if not self._topic_queue:
+                # Complete previous page if any
+                if self._current_page_num is not None:
+                    self.repo.complete_page(category_id, self._current_page_num, self.worker_id)
+                    self._emit_status(f"Page {self._current_page_num} completed")
+
+                # Claim next page
+                self._current_page_num = self.repo.claim_next_page(category_id, self.worker_id)
+                if self._current_page_num is None:
+                    self._emit_status("All pages processed")
+                    break
+
+                self._emit_status(f"Scanning page {self._current_page_num}...")
+                try:
+                    topics = get_topic_list(
+                        self.page,
+                        cfg["tracker"]["forum_url"],
+                        category_id,
+                        self._current_page_num,
+                    )
+                    self._topic_queue = list(topics)
+                    self._emit_status(f"Page {self._current_page_num}: {len(topics)} topics")
+                except Exception as e:
+                    self.log.error(f"Failed to scan page {self._current_page_num}: {e}")
+                    self._emit_status(f"Scan error: {e}")
+                    self.repo.release_page(category_id, self.worker_id)
+                    self._current_page_num = None
+                    continue
+
+            # ── Process next topic from queue ───────────────────
+            if self._topic_queue:
+                topic = self._topic_queue.pop(0)
+                self._process_single_topic(cfg, topic, category_id, download_tags, record_tags, download_dir)
 
         # Cleanup
+        if self._current_page_num is not None and self._topic_queue:
+            # Didn't finish this page — release it so another worker can take it
+            self.repo.release_page(category_id, self.worker_id)
+
         if self.ctx:
             try:
                 self.ctx.close()
             except Exception:
                 pass
 
-    def _process_page(self, cfg, category_id, page_num, download_tags, record_tags, download_dir):
-        """Process all topics on a single page."""
-        topics = get_topic_list(
-            self.page,
-            cfg["tracker"]["forum_url"],
-            category_id,
-            page_num,
-        )
+    # ── Single topic processing ─────────────────────────────────
 
-        for topic in topics:
-            if self.should_stop:
-                break
-            self.wait_if_paused()
+    def _process_single_topic(self, cfg, topic, category_id, download_tags, record_tags, download_dir):
+        """Process one topic: extract details, optionally download."""
+        topic_id = topic["topic_id"]
+        title = topic["title"]
 
-            topic_id = topic["topic_id"]
-            title = topic["title"]
+        # Skip duplicates
+        t = self.repo.add_torrent(topic_id, title, category_id, self._current_page_num)
+        if t is None:
+            return  # already in DB
 
-            # Add to DB (skip duplicates)
-            t = self.repo.add_torrent(topic_id, title, category_id, page_num)
-            if t is None:
-                continue  # already processed
+        self._emit_status(f"Topic {topic_id}: {title[:50]}...")
 
-            self._emit_status(f"Checking topic {topic_id}: {title[:40]}...")
-
-            # Extract details
+        try:
             details = extract_topic_details(
                 self.page,
                 cfg["tracker"]["base_url"],
@@ -151,48 +243,56 @@ class ParserWorker(BaseWorker):
                 download_tags,
                 record_tags,
             )
+        except Exception as e:
+            self.log.error(f"Failed to extract topic {topic_id}: {e}")
+            self.repo.mark_torrent_error(topic_id)
+            return
 
-            self.repo.update_torrent_tags(
-                topic_id,
-                details["matched_download_tags"],
-                details["matched_record_tags"],
-                details["description"],
-                details["cover_url"],
-            )
+        self.repo.update_torrent_tags(
+            topic_id,
+            details["matched_download_tags"],
+            details["matched_record_tags"],
+            details["description"],
+            details["cover_url"],
+        )
 
-            # Download if matching download tags found
-            if details["matched_download_tags"]:
-                self._download_topic(cfg, topic_id, details["cover_url"], download_dir)
-
-            human_delay(0.5, 1.5)
-
-    def _download_topic(self, cfg, topic_id, cover_url, download_dir):
-        """Download torrent file, re-login if download limit reached."""
-        # Check if we need new account
-        if self.downloads_remaining <= 0:
-            self._emit_status("Download limit reached — switching account...")
-            if self.current_account:
-                self.repo.exhaust_tracker_account(self.current_account.id)
-            while not self.should_stop:
-                if self._get_account_and_login(cfg):
-                    break
-                self._stop_event.wait(timeout=10)
-            if self.should_stop:
+        # Download if matching tags
+        if details["matched_download_tags"]:
+            if self.downloads_remaining <= 0:
+                # Save topic for after relogin
+                self._pending_download = {
+                    "topic_id": topic_id,
+                    "cover_url": details["cover_url"],
+                }
+                if not self._switch_account(cfg):
+                    return
+                # Will be handled in main loop via _pending_download
                 return
 
+            self._do_download(cfg, topic_id, details["cover_url"], download_dir)
+
+        human_delay(0.5, 1.5)
+
+    def _do_download(self, cfg, topic_id, cover_url, download_dir) -> bool:
+        """
+        Download a torrent file. Returns True on success, False if limit hit.
+        """
+        if self.downloads_remaining <= 0:
+            return False
+
         self.repo.mark_torrent_downloading(topic_id)
-        self._emit_status(f"Downloading torrent {topic_id}...")
+        self._emit_status(f"Downloading {topic_id}...")
 
         file_path = download_torrent_file(self.page, cfg["tracker"]["base_url"], topic_id, download_dir)
         if file_path:
-            # Download cover image too
             cover_path = download_cover_image(self.page, cover_url, download_dir, topic_id)
             self.repo.mark_torrent_downloaded(topic_id, file_path, cover_path)
 
-            # Track download count
-            still_ok = self.repo.increment_download(self.current_account.id)
             self.downloads_remaining -= 1
-            self._emit_status(f"Downloaded {topic_id} ({self.downloads_remaining} remaining)")
+            self.repo.increment_download(self.current_account.id)
+            self._emit_status(f"Downloaded {topic_id} ({self.downloads_remaining} left)")
+            return True
         else:
             self.repo.mark_torrent_error(topic_id)
-            self._emit_status(f"Failed to download {topic_id}")
+            self._emit_status(f"Download failed: {topic_id}")
+            return True  # failed but not because of limit
