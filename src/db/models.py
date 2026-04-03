@@ -119,9 +119,23 @@ class Torrent(Base):
 
 
 def init_db():
-    """Initialize database, create tables if they don't exist."""
+    """Initialize database, create tables. Auto-migrates torrents table if schema is outdated."""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     engine = create_engine(f"sqlite:///{DB_PATH}", echo=False)
+
+    # Check if torrents table exists but has old schema (missing title_raw column).
+    # If so, drop and recreate it so the new columns are available.
+    with engine.connect() as conn:
+        try:
+            cols = [row[1] for row in conn.execute(
+                __import__("sqlalchemy").text("PRAGMA table_info(torrents)")
+            )]
+            if cols and "title_raw" not in cols:
+                conn.execute(__import__("sqlalchemy").text("DROP TABLE torrents"))
+                conn.commit()
+        except Exception:
+            pass
+
     Base.metadata.create_all(engine)
     return engine
 
