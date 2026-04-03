@@ -4,7 +4,8 @@
         "category_id": "",
         "pages_start": 1,
         "pages_end": 700,
-        "max_downloads_per_account": 3
+        "max_downloads_per_account": 3,
+        "skip_registration": false
     },
     "workers": {
         "parser_count": 3,

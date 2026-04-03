@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTabWidget,
     QPushButton, QLabel, QTextEdit, QTableWidget, QTableWidgetItem,
     QGroupBox, QFormLayout, QLineEdit, QSpinBox, QListWidget, QComboBox,
-    QHeaderView, QSplitter, QMessageBox, QPlainTextEdit, QScrollArea,
+    QHeaderView, QSplitter, QMessageBox, QPlainTextEdit, QScrollArea, QCheckBox,
 )
 from PySide6.QtCore import Qt, QTimer, Signal, QObject
 from PySide6.QtGui import QColor
@@ -139,9 +139,15 @@ class MainWindow(QMainWindow):
         list_group = QGroupBox("Email Accounts")
         ll = QVBoxLayout(list_group)
 
+        email_btn_row = QHBoxLayout()
         btn_refresh = QPushButton("Refresh")
         btn_refresh.clicked.connect(self._refresh_email_table)
-        ll.addWidget(btn_refresh)
+        btn_clear_all = QPushButton("Clear All")
+        btn_clear_all.clicked.connect(self._on_clear_all_emails)
+        email_btn_row.addWidget(btn_refresh)
+        email_btn_row.addWidget(btn_clear_all)
+        email_btn_row.addStretch()
+        ll.addLayout(email_btn_row)
 
         self.email_table = QTableWidget(0, 3)
         self.email_table.setHorizontalHeaderLabels(["Email", "Status", "Added"])
@@ -165,6 +171,17 @@ class MainWindow(QMainWindow):
         self.lbl_import_result.setText(msg)
         self.email_input.clear()
         self._refresh_email_table()
+
+    def _on_clear_all_emails(self):
+        reply = QMessageBox.question(
+            self, "Clear All Emails",
+            "Delete ALL email accounts from the database?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            count = self.coordinator.repo.clear_all_emails()
+            self.lbl_import_result.setText(f"Deleted {count} emails")
+            self._refresh_email_table()
 
     def _refresh_email_table(self):
         emails = self.coordinator.repo.get_all_emails()
@@ -281,12 +298,18 @@ class MainWindow(QMainWindow):
         self.cfg_pages_start = QSpinBox(); self.cfg_pages_start.setRange(1, 9999)
         self.cfg_pages_end = QSpinBox(); self.cfg_pages_end.setRange(1, 9999)
         self.cfg_max_dl = QSpinBox(); self.cfg_max_dl.setRange(1, 50)
+        self.cfg_skip_reg = QCheckBox("Skip registration — login directly with email credentials")
+        self.cfg_skip_reg.setToolTip(
+            "When enabled, the email list is treated as tracker logins (login:password).\n"
+            "No registration will be performed — workers log in directly."
+        )
         tl.addRow("Tracker:", self.cfg_tracker_profile)
         tl.addRow("", self.cfg_tracker_url_label)
         tl.addRow("Category ID:", self.cfg_category_id)
         tl.addRow("Pages start:", self.cfg_pages_start)
         tl.addRow("Pages end:", self.cfg_pages_end)
         tl.addRow("Max downloads/account:", self.cfg_max_dl)
+        tl.addRow("", self.cfg_skip_reg)
         layout.addWidget(tracker_group)
 
         # Workers settings
@@ -387,6 +410,7 @@ class MainWindow(QMainWindow):
         self.cfg_pages_start.setValue(cfg["tracker"]["pages_start"])
         self.cfg_pages_end.setValue(cfg["tracker"]["pages_end"])
         self.cfg_max_dl.setValue(cfg["tracker"]["max_downloads_per_account"])
+        self.cfg_skip_reg.setChecked(cfg["tracker"].get("skip_registration", False))
 
         self.cfg_parser_count.setValue(cfg["workers"]["parser_count"])
         # email_reg_count removed — parser workers handle registration themselves
@@ -416,6 +440,7 @@ class MainWindow(QMainWindow):
                 "pages_start": self.cfg_pages_start.value(),
                 "pages_end": self.cfg_pages_end.value(),
                 "max_downloads_per_account": self.cfg_max_dl.value(),
+                "skip_registration": self.cfg_skip_reg.isChecked(),
             },
             "workers": {
                 "parser_count": self.cfg_parser_count.value(),

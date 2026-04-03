@@ -102,6 +102,15 @@ class Repository:
                 for e in emails
             ]
 
+    def clear_all_emails(self) -> int:
+        """Delete all email accounts. Returns count deleted."""
+        with _lock:
+            s = self._session()
+            count = s.query(EmailAccount).count()
+            s.query(EmailAccount).delete()
+            s.commit()
+            return count
+
     # ── Blocked Domains ─────────────────────────────────────────
 
     def add_blocked_domain(self, domain: str, reason: str = "") -> bool:

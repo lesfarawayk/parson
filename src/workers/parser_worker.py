@@ -65,9 +65,12 @@ class ParserWorker(BaseWorker):
 
     def _new_account_cycle(self, cfg: dict, profile: TrackerProfile) -> bool:
         """
-        Full cycle: take email from DB → register on tracker → log in.
+        Full cycle: take credentials from DB → optionally register → log in.
+        When skip_registration is True, email list is treated as tracker logins.
         Returns True on success. Email is marked IN_USE atomically (thread-safe).
         """
+        skip_reg = cfg["tracker"].get("skip_registration", False)
+
         # Close old browser context
         if self.ctx:
             try:
@@ -77,68 +80,73 @@ class ParserWorker(BaseWorker):
             self.ctx = None
             self.page = None
 
-        # 1. Get fresh email (thread-safe — claimed atomically)
+        # 1. Get fresh email/account (thread-safe — claimed atomically)
         email = self.repo.get_fresh_email()
         if not email:
             self._emit_status("No fresh emails — add more in the Emails tab!")
             return False
 
         self._current_email_id = email.id
-        self._emit_status(f"Using email: {email.email}")
+        self._emit_status(f"Using: {email.email}")
 
         # 2. Create browser context (visible window, unique fingerprint)
         self.ctx = self.browser.create_context(proxy=self.proxy)
 
-        # Set window title so user can identify which worker is which
-        first_page = self.ctx.new_page()
-        first_page.evaluate(f"document.title = 'Worker: {self.worker_id}'")
+        if skip_reg:
+            # Direct login mode — email:password = tracker login:password
+            username = email.email
+            password = email.password
+            self._emit_status(f"[{profile.name}] Logging in as {username} (skip registration)...")
+        else:
+            # Registration mode — register new account, then login
+            first_page = self.ctx.new_page()
+            first_page.evaluate(f"document.title = 'Worker: {self.worker_id}'")
 
-        # 3. Register on tracker
-        username = _random_username()
-        password = _random_password()
+            username = _random_username()
+            password = _random_password()
 
-        self._emit_status(f"[{profile.name}] Registering {username} with {email.email}...")
-        try:
-            success = register_on_tracker(
-                self.ctx, profile, username, password, email.email,
-                captcha_solver=self.captcha_solver,
-                worker_id=self.worker_id,
-                status_callback=self._emit_status,
-                notletters_client=self.notletters,
-                email_password=email.password,
-            )
-        except DomainBannedException as e:
+            self._emit_status(f"[{profile.name}] Registering {username} with {email.email}...")
+            try:
+                success = register_on_tracker(
+                    self.ctx, profile, username, password, email.email,
+                    captcha_solver=self.captcha_solver,
+                    worker_id=self.worker_id,
+                    status_callback=self._emit_status,
+                    notletters_client=self.notletters,
+                    email_password=email.password,
+                )
+            except DomainBannedException as e:
+                first_page.close()
+                domain = e.domain
+                log.warning(f"Domain '{domain}' blacklisted — banning all emails with this domain")
+                self._emit_status(f"Domain '{domain}' blacklisted — banned")
+                self.repo.add_blocked_domain(domain, reason=f"Blacklisted by {profile.name}")
+                self.repo.mark_email_used(email.id)
+                try:
+                    self.ctx.close()
+                except Exception:
+                    pass
+                self.ctx = None
+                return False
+
             first_page.close()
-            domain = e.domain
-            log.warning(f"Domain '{domain}' blacklisted by tracker — banning all emails with this domain")
-            self._emit_status(f"Domain '{domain}' blacklisted — all emails with this domain marked banned")
-            self.repo.add_blocked_domain(domain, reason=f"Blacklisted by {profile.name} registration form")
-            self.repo.mark_email_used(email.id)
-            try:
-                self.ctx.close()
-            except Exception:
-                pass
-            self.ctx = None
-            return False
 
-        first_page.close()
+            if not success:
+                self._emit_status(f"Registration failed for {email.email}")
+                self.repo.mark_email_used(email.id)
+                try:
+                    self.ctx.close()
+                except Exception:
+                    pass
+                self.ctx = None
+                return False
 
-        if not success:
-            self._emit_status(f"Registration failed for {email.email}")
-            self.repo.mark_email_used(email.id)
-            try:
-                self.ctx.close()
-            except Exception:
-                pass
-            self.ctx = None
-            return False
-
-        # 4. Log in with new account
+        # Log in
         self._emit_status(f"[{profile.name}] Logging in as {username}...")
         try:
             self.page = login(self.ctx, profile, username, password)
         except Exception as e:
-            self.log.error(f"Login failed after registration: {e}")
+            self.log.error(f"Login failed: {e}")
             self._emit_status(f"Login failed: {e}")
             self.repo.mark_email_used(email.id)
             try:
