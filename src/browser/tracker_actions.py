@@ -14,6 +14,14 @@ from .tracker_profiles import TrackerProfile
 
 log = logging.getLogger(__name__)
 
+
+class DomainBannedException(Exception):
+    """Raised when the tracker rejects the email domain as blacklisted."""
+    def __init__(self, domain: str):
+        self.domain = domain
+        super().__init__(f"Domain '{domain}' is blacklisted by the tracker")
+
+
 HUMAN_DELAY = (0.5, 2.0)
 
 
@@ -189,10 +197,117 @@ def solve_captcha_on_page(page: Page, profile: TrackerProfile,
         return False
 
 
+def _select_country(page: Page, profile: TrackerProfile):
+    """Select Russia in the country dropdown if it exists."""
+    country_sel = getattr(profile, "reg_country_sel", None)
+    if not country_sel:
+        return
+    try:
+        el = page.query_selector(country_sel)
+        if not el:
+            return
+        # Try to pick Russia by option text, fall back to first non-empty option
+        options = el.query_selector_all("option")
+        for opt in options:
+            text = (opt.inner_text() or "").strip()
+            if "Россия" in text or "Russia" in text or "Российская" in text:
+                val = opt.get_attribute("value")
+                if val:
+                    el.select_option(value=val)
+                    log.info(f"[{profile.name}] Selected country: {text}")
+                    return
+        # Fall back: pick first option that has a non-empty, non-zero value
+        for opt in options[1:]:
+            val = opt.get_attribute("value") or ""
+            if val and val != "0":
+                el.select_option(value=val)
+                log.info(f"[{profile.name}] Selected country fallback: {opt.inner_text().strip()}")
+                return
+    except Exception as e:
+        log.warning(f"Country select failed: {e}")
+
+
+def activate_via_email(page: Page, profile: TrackerProfile,
+                       notletters_client, email_addr: str, email_password: str,
+                       status_callback=None) -> bool:
+    """
+    Poll NotLetters mailbox for activation email and navigate to the link.
+    Returns True if activation link was clicked successfully.
+    """
+    if status_callback:
+        status_callback("Waiting for activation email (up to 5 min)...")
+
+    # Poll with broad search terms
+    letter = None
+    for search in ["актив", "activat", "confirm", "подтвер"]:
+        letter = notletters_client.wait_for_letter(
+            email_addr, email_password,
+            search=search, timeout=300, interval=10,
+        )
+        if letter:
+            break
+
+    if not letter:
+        log.warning(f"[{profile.name}] No activation email received for {email_addr}")
+        if status_callback:
+            status_callback("No activation email — check spam or try again")
+        return False
+
+    log.info(f"[{profile.name}] Got activation email: {letter.subject}")
+
+    # Extract activation URL — look for link containing tracker domain
+    content = letter.html or letter.text or ""
+    domain = profile.base_url.replace("https://", "").replace("http://", "")
+    # Strip any path after domain to get just hostname
+    domain = domain.split("/")[0]
+
+    # Find all URLs in the email
+    all_urls = re.findall(r'https?://[^\s"\'<>\]]+', content)
+    activation_url = None
+    for url in all_urls:
+        if domain in url and ("activ" in url.lower() or "confirm" in url.lower()
+                              or "mode=activate" in url.lower()
+                              or "profile.php" in url.lower()):
+            activation_url = url
+            break
+
+    if not activation_url:
+        # Try any URL from that domain
+        for url in all_urls:
+            if domain in url:
+                activation_url = url
+                break
+
+    if not activation_url:
+        log.warning(f"[{profile.name}] Could not find activation URL in email")
+        return False
+
+    log.info(f"[{profile.name}] Navigating to activation URL: {activation_url}")
+    if status_callback:
+        status_callback("Clicking activation link...")
+
+    page.goto(activation_url, wait_until="domcontentloaded")
+    human_delay(2, 4)
+
+    # Check page for success indicators
+    page_text = page.inner_text("body")[:1000].lower()
+    success = any(kw in page_text for kw in [
+        "активирован", "activated", "успешно", "success",
+        "можете войти", "you can now login", "account has been",
+    ])
+    if success:
+        log.info(f"[{profile.name}] Account activated for {email_addr}")
+    else:
+        log.warning(f"[{profile.name}] Activation page text (may still be ok): {page_text[:200]}")
+
+    return True
+
+
 def register_on_tracker(ctx: BrowserContext, profile: TrackerProfile,
                         username: str, password: str, email: str,
                         captcha_solver=None, worker_id: str = "",
-                        status_callback=None) -> bool:
+                        status_callback=None,
+                        notletters_client=None, email_password: str = "") -> bool:
     """
     Register a new account on the tracker.
     captcha_solver: TelegramCaptchaSolver instance or None (manual mode).
@@ -287,6 +402,10 @@ def register_on_tracker(ctx: BrowserContext, profile: TrackerProfile,
         fill_field(profile.reg_email_sel, email, "email")
         human_delay(0.3, 0.8)
 
+        # Country dropdown
+        _select_country(page, profile)
+        human_delay(0.2, 0.5)
+
         # CAPTCHA
         solve_captcha_on_page(page, profile, captcha_solver, worker_id, status_callback)
 
@@ -312,21 +431,60 @@ def register_on_tracker(ctx: BrowserContext, profile: TrackerProfile,
         page.wait_for_load_state("domcontentloaded")
         human_delay(2, 4)
 
-        page_text = page.inner_text("body")[:500].lower()
-        success = (
+        page_text = page.inner_text("body")[:1000].lower()
+
+        # Check for domain blacklist error before anything else
+        if "чёрном списке" in page_text or "black list" in page_text or "blacklisted" in page_text:
+            domain = email.split("@")[1] if "@" in email else ""
+            log.warning(f"[{profile.name}] Domain '{domain}' blacklisted by tracker during registration")
+            page.close()
+            raise DomainBannedException(domain)
+
+        reg_success = (
             "profile.php" in page.url or
             "login" in page.url.lower() or
             "подтвер" in page_text or
             "confirm" in page_text or
-            "актив" in page_text
+            "актив" in page_text or
+            "учётная запись была создана" in page_text or
+            "account has been created" in page_text
         )
 
-        page.close()
-        if success:
-            log.info(f"[{profile.name}] Registered: {username}")
-        else:
+        if not reg_success:
             log.warning(f"[{profile.name}] Registration may have failed for {username}")
-        return success
+            page.close()
+            return False
+
+        log.info(f"[{profile.name}] Registration form submitted, account created: {username}")
+
+        # Email activation required
+        needs_activation = (
+            "актив" in page_text or
+            "activat" in page_text or
+            "учётная запись была создана" in page_text or
+            "account has been created" in page_text
+        )
+
+        if needs_activation and notletters_client and email_password:
+            activated = activate_via_email(
+                page, profile, notletters_client, email, email_password,
+                status_callback=status_callback,
+            )
+            if not activated:
+                log.warning(f"[{profile.name}] Email activation failed for {username}")
+                page.close()
+                return False
+        elif needs_activation:
+            log.warning(
+                f"[{profile.name}] Account {username} needs email activation "
+                f"but no NotLetters client configured — login may fail"
+            )
+            if status_callback:
+                status_callback("Account needs email activation — configure NotLetters API token")
+
+        page.close()
+        log.info(f"[{profile.name}] Registered and activated: {username}")
+        return True
 
     except Exception as e:
         log.error(f"[{profile.name}] Registration error: {e}")

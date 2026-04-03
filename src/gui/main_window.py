@@ -73,6 +73,7 @@ class MainWindow(QMainWindow):
         tabs = QTabWidget()
         tabs.addTab(self._build_dashboard_tab(), "Dashboard")
         tabs.addTab(self._build_emails_tab(), "Emails")
+        tabs.addTab(self._build_blocked_domains_tab(), "Blocked Domains")
         tabs.addTab(self._build_config_tab(), "Settings")
         tabs.addTab(self._build_log_tab(), "Log")
         layout.addWidget(tabs)
@@ -157,8 +158,11 @@ class MainWindow(QMainWindow):
         if not lines or not text.strip():
             self.lbl_import_result.setText("Nothing to import")
             return
-        count = self.coordinator.repo.import_emails(lines)
-        self.lbl_import_result.setText(f"Imported {count} new emails")
+        added, skipped = self.coordinator.repo.import_emails(lines)
+        msg = f"Imported {added} new emails"
+        if skipped:
+            msg += f" ({skipped} skipped — blocked domain)"
+        self.lbl_import_result.setText(msg)
         self.email_input.clear()
         self._refresh_email_table()
 
@@ -191,6 +195,72 @@ class MainWindow(QMainWindow):
             self.email_table.setItem(row, 0, email_item)
             self.email_table.setItem(row, 1, status_item)
             self.email_table.setItem(row, 2, date_item)
+
+    # ── Blocked Domains tab ─────────────────────────────────────
+
+    def _build_blocked_domains_tab(self) -> QWidget:
+        w = QWidget()
+        layout = QVBoxLayout(w)
+
+        info = QLabel(
+            "Domains automatically blocked when the tracker rejects them during registration.\n"
+            "All emails with a blocked domain are marked as banned and skipped by workers."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        # Table
+        self.blocked_table = QTableWidget(0, 3)
+        self.blocked_table.setHorizontalHeaderLabels(["Domain", "Reason", "Blocked At"])
+        self.blocked_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.blocked_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.blocked_table.setSelectionBehavior(QTableWidget.SelectRows)
+        layout.addWidget(self.blocked_table)
+
+        # Buttons
+        btn_row = QHBoxLayout()
+        btn_refresh = QPushButton("Refresh")
+        btn_refresh.clicked.connect(self._refresh_blocked_table)
+        btn_remove = QPushButton("Remove Selected Domain")
+        btn_remove.clicked.connect(self._on_remove_blocked_domain)
+        btn_row.addWidget(btn_refresh)
+        btn_row.addWidget(btn_remove)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+
+        self._refresh_blocked_table()
+        return w
+
+    def _refresh_blocked_table(self):
+        domains = self.coordinator.repo.get_blocked_domains()
+        self.blocked_table.setRowCount(len(domains))
+        for row, d in enumerate(domains):
+            self.blocked_table.setItem(row, 0, QTableWidgetItem(d["domain"]))
+            self.blocked_table.setItem(row, 1, QTableWidgetItem(d["reason"]))
+            self.blocked_table.setItem(row, 2, QTableWidgetItem(d["blocked_at"]))
+            color = QColor(255, 220, 220)
+            for col in range(3):
+                item = self.blocked_table.item(row, col)
+                if item:
+                    item.setBackground(color)
+
+    def _on_remove_blocked_domain(self):
+        row = self.blocked_table.currentRow()
+        if row < 0:
+            return
+        domain_item = self.blocked_table.item(row, 0)
+        if not domain_item:
+            return
+        domain = domain_item.text()
+        reply = QMessageBox.question(
+            self, "Remove Domain",
+            f"Remove '{domain}' from blocklist?\n"
+            "(Existing banned emails will NOT be re-enabled automatically)",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            self.coordinator.repo.remove_blocked_domain(domain)
+            self._refresh_blocked_table()
 
     # ── Config tab ──────────────────────────────────────────────
 
@@ -453,8 +523,9 @@ class MainWindow(QMainWindow):
                 f"Pages done: {stats['pages_completed']}"
             )
             self.lbl_stats.setText(text)
-            # Auto-refresh email table every cycle
+            # Auto-refresh email and blocked domains tables every cycle
             self._refresh_email_table()
+            self._refresh_blocked_table()
         except Exception:
             pass
 

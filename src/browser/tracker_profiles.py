@@ -34,6 +34,7 @@ PROFILES = {
         reg_email_sel="input[name='user_email'], input[name='email']",
         reg_captcha_img_sel="img[src*='captcha']",
         reg_captcha_input_sel="input[name^='cap_code']",
+        reg_country_sel="select[name='user_country']",
         reg_submit_sel="input[type='submit'][name='submit'], button[type='submit']",
 
         # Category / topic listing
@@ -70,6 +71,7 @@ PROFILES = {
         reg_email_sel="input[name='user_email']",
         reg_captcha_img_sel="img[src*='captcha']",
         reg_captcha_input_sel="input[name^='cap_code']",
+        reg_country_sel="select[name='user_country']",
         reg_submit_sel="input[type='submit'][name='submit'], input[type='submit'], button[type='submit']",
 
         # Category / topic listing

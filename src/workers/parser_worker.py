@@ -23,10 +23,11 @@ from ..db.repository import Repository
 from ..browser.browser_manager import WorkerBrowser
 from ..browser.tracker_actions import (
     login, register_on_tracker, get_topic_list, extract_topic_details,
-    download_torrent_file, download_cover_image, human_delay,
+    download_torrent_file, download_cover_image, human_delay, DomainBannedException,
 )
 from ..browser.tracker_profiles import get_profile, TrackerProfile
 from ..api.telegram_captcha import TelegramCaptchaSolver
+from ..api.notletters import NotLettersClient
 from ..config_manager import load_config, get_download_dir
 
 log = logging.getLogger(__name__)
@@ -50,6 +51,7 @@ class ParserWorker(BaseWorker):
         self.page = None
         self.downloads_remaining = 0
         self.captcha_solver: TelegramCaptchaSolver | None = None
+        self.notletters: NotLettersClient | None = None
 
         # Current email being used
         self._current_email_id: int | None = None
@@ -96,12 +98,28 @@ class ParserWorker(BaseWorker):
         password = _random_password()
 
         self._emit_status(f"[{profile.name}] Registering {username} with {email.email}...")
-        success = register_on_tracker(
-            self.ctx, profile, username, password, email.email,
-            captcha_solver=self.captcha_solver,
-            worker_id=self.worker_id,
-            status_callback=self._emit_status,
-        )
+        try:
+            success = register_on_tracker(
+                self.ctx, profile, username, password, email.email,
+                captcha_solver=self.captcha_solver,
+                worker_id=self.worker_id,
+                status_callback=self._emit_status,
+                notletters_client=self.notletters,
+                email_password=email.password,
+            )
+        except DomainBannedException as e:
+            first_page.close()
+            domain = e.domain
+            log.warning(f"Domain '{domain}' blacklisted by tracker — banning all emails with this domain")
+            self._emit_status(f"Domain '{domain}' blacklisted — all emails with this domain marked banned")
+            self.repo.add_blocked_domain(domain, reason=f"Blacklisted by {profile.name} registration form")
+            self.repo.mark_email_used(email.id)
+            try:
+                self.ctx.close()
+            except Exception:
+                pass
+            self.ctx = None
+            return False
 
         first_page.close()
 
@@ -175,6 +193,11 @@ class ParserWorker(BaseWorker):
         tg = cfg.get("telegram", {})
         if tg.get("bot_token") and tg.get("chat_id"):
             self.captcha_solver = TelegramCaptchaSolver(tg["bot_token"], tg["chat_id"])
+
+        # Init NotLetters client for email activation
+        nl = cfg.get("notletters", {})
+        if nl.get("api_token"):
+            self.notletters = NotLettersClient(nl["api_token"])
 
         if not category_id:
             self._emit_status("No category ID configured")

@@ -70,6 +70,16 @@ class PageProgress(Base):
     completed_at = Column(DateTime, nullable=True)
 
 
+class BlockedDomain(Base):
+    """Email domains blacklisted by the tracker registration form."""
+    __tablename__ = "blocked_domains"
+
+    id = Column(Integer, primary_key=True)
+    domain = Column(String(255), unique=True, nullable=False)
+    reason = Column(String(500), nullable=True)
+    blocked_at = Column(DateTime, default=datetime.utcnow)
+
+
 class Torrent(Base):
     __tablename__ = "torrents"
 
