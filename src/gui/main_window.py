@@ -321,16 +321,18 @@ class MainWindow(QMainWindow):
         wl.addRow("Download dir:", self.cfg_download_dir)
         layout.addWidget(workers_group)
 
-        # Tags
-        tags_group = QGroupBox("Tags")
-        tags_layout = QFormLayout(tags_group)
-        self.cfg_dl_tags = QLineEdit()
-        self.cfg_dl_tags.setPlaceholderText("Comma-separated: 4K, 2160p, UHD")
-        self.cfg_rec_tags = QLineEdit()
-        self.cfg_rec_tags.setPlaceholderText("Comma-separated: военное, зарубежное, драма")
-        tags_layout.addRow("Download tags:", self.cfg_dl_tags)
-        tags_layout.addRow("Record tags:", self.cfg_rec_tags)
-        layout.addWidget(tags_group)
+        # Format filters
+        fmt_group = QGroupBox("Format Filters")
+        fmt_layout = QFormLayout(fmt_group)
+        self.cfg_format_filters = QLineEdit()
+        self.cfg_format_filters.setPlaceholderText("Comma-separated: 4K, 2160p, UHD, 8K (empty = accept all)")
+        self.cfg_format_filters.setToolTip(
+            "Only save torrents whose title contains one of these video formats.\n"
+            "Duplicates like 4K and 2160p are auto-deduplicated.\n"
+            "Leave empty to save all torrents regardless of format."
+        )
+        fmt_layout.addRow("Formats:", self.cfg_format_filters)
+        layout.addWidget(fmt_group)
 
         # NotLetters
         nl_group = QGroupBox("NotLetters (Email Provider)")
@@ -416,8 +418,8 @@ class MainWindow(QMainWindow):
         # email_reg_count removed — parser workers handle registration themselves
         self.cfg_download_dir.setText(cfg["workers"]["download_dir"])
 
-        self.cfg_dl_tags.setText(", ".join(cfg["tags"]["download_tags"]))
-        self.cfg_rec_tags.setText(", ".join(cfg["tags"]["record_tags"]))
+        fmt = cfg["tags"].get("format_filters", cfg["tags"].get("download_tags", []))
+        self.cfg_format_filters.setText(", ".join(fmt))
 
         proxies = cfg["proxy"].get("list", [])
         self.cfg_proxy_list.setPlainText("\n".join(proxies))
@@ -447,8 +449,8 @@ class MainWindow(QMainWindow):
                 "download_dir": self.cfg_download_dir.text().strip() or "downloads",
             },
             "tags": {
-                "download_tags": [t.strip() for t in self.cfg_dl_tags.text().split(",") if t.strip()],
-                "record_tags": [t.strip() for t in self.cfg_rec_tags.text().split(",") if t.strip()],
+                "format_filters": [t.strip() for t in self.cfg_format_filters.text().split(",") if t.strip()],
+                "record_tags": [],
             },
             "proxy": {
                 "enabled": len(proxy_lines) > 0,
@@ -539,12 +541,11 @@ class MainWindow(QMainWindow):
             stats = self.coordinator.get_stats()
             text = (
                 f"Torrents: {stats['total_torrents']}  |  "
-                f"Downloaded: {stats['downloaded']}  |  "
-                f"Tagged: {stats['tagged']}  |  "
+                f"Parsed: {stats['parsed']}  |  "
+                f"Approved: {stats['approved']}  |  "
                 f"Skipped: {stats['skipped']}  |  "
                 f"Errors: {stats['errors']}\n"
                 f"Fresh emails: {stats['fresh_emails']}  |  "
-                f"Fresh accounts: {stats['fresh_accounts']}  |  "
                 f"Pages done: {stats['pages_completed']}"
             )
             self.lbl_stats.setText(text)

@@ -272,59 +272,49 @@ class Repository:
 
     # ── Torrents ────────────────────────────────────────────────
 
-    def add_torrent(self, topic_id: str, title: str, category_id: str, page_number: int) -> Torrent | None:
-        """Add torrent if not exists. Returns None if duplicate."""
+    def torrent_exists(self, topic_id: str) -> bool:
+        """Check if topic_id already in DB."""
         with _lock:
             s = self._session()
-            existing = s.query(Torrent).filter(Torrent.topic_id == topic_id).first()
-            if existing:
+            return s.query(Torrent).filter(Torrent.topic_id == topic_id).first() is not None
+
+    def save_torrent_data(self, data: dict) -> Torrent | None:
+        """
+        Save fully parsed torrent data. Skips duplicates.
+        data keys: topic_id, title_raw, category_id, page_number,
+                   studio, film_name, tags, formats, devices,
+                   year, description, duration, file_size,
+                   cover_url, cover_path, download_url, seeds, peers.
+        """
+        with _lock:
+            s = self._session()
+            if s.query(Torrent).filter(Torrent.topic_id == data["topic_id"]).first():
                 return None
             t = Torrent(
-                topic_id=topic_id, title=title,
-                category_id=category_id, page_number=page_number
+                topic_id=data["topic_id"],
+                title_raw=data["title_raw"],
+                category_id=data["category_id"],
+                page_number=data["page_number"],
+                status=TorrentStatus.PARSED,
+                studio=data.get("studio", ""),
+                film_name=data.get("film_name", ""),
+                tags=json.dumps(data.get("tags", []), ensure_ascii=False),
+                formats=json.dumps(data.get("formats", []), ensure_ascii=False),
+                devices=json.dumps(data.get("devices", []), ensure_ascii=False),
+                year=data.get("year", ""),
+                description=data.get("description", ""),
+                duration=data.get("duration", ""),
+                file_size=data.get("file_size", ""),
+                cover_url=data.get("cover_url"),
+                cover_path=data.get("cover_path"),
+                download_url=data.get("download_url"),
+                seeds=data.get("seeds", 0),
+                peers=data.get("peers", 0),
             )
             s.add(t)
             s.commit()
             s.refresh(t)
             return t
-
-    def update_torrent_tags(self, topic_id: str, download_tags: list, record_tags: list,
-                            description: str = None, cover_url: str = None):
-        with _lock:
-            s = self._session()
-            t = s.query(Torrent).filter(Torrent.topic_id == topic_id).first()
-            if t:
-                t.download_tags = json.dumps(download_tags, ensure_ascii=False)
-                t.record_tags = json.dumps(record_tags, ensure_ascii=False)
-                if description:
-                    t.description = description
-                if cover_url:
-                    t.cover_url = cover_url
-                if download_tags:
-                    t.status = TorrentStatus.TAGGED
-                else:
-                    t.status = TorrentStatus.SKIPPED
-                s.commit()
-
-    def mark_torrent_downloading(self, topic_id: str):
-        with _lock:
-            s = self._session()
-            t = s.query(Torrent).filter(Torrent.topic_id == topic_id).first()
-            if t:
-                t.status = TorrentStatus.DOWNLOADING
-                s.commit()
-
-    def mark_torrent_downloaded(self, topic_id: str, file_path: str, cover_path: str = None):
-        with _lock:
-            s = self._session()
-            t = s.query(Torrent).filter(Torrent.topic_id == topic_id).first()
-            if t:
-                t.status = TorrentStatus.DOWNLOADED
-                t.file_path = file_path
-                t.downloaded_at = datetime.utcnow()
-                if cover_path:
-                    t.cover_path = cover_path
-                s.commit()
 
     def mark_torrent_error(self, topic_id: str):
         with _lock:
@@ -340,11 +330,10 @@ class Repository:
             s = self._session()
             return {
                 "total_torrents": s.query(Torrent).count(),
-                "downloaded": s.query(Torrent).filter(Torrent.status == TorrentStatus.DOWNLOADED).count(),
-                "tagged": s.query(Torrent).filter(Torrent.status == TorrentStatus.TAGGED).count(),
+                "parsed": s.query(Torrent).filter(Torrent.status == TorrentStatus.PARSED).count(),
+                "approved": s.query(Torrent).filter(Torrent.status == TorrentStatus.APPROVED).count(),
                 "skipped": s.query(Torrent).filter(Torrent.status == TorrentStatus.SKIPPED).count(),
                 "errors": s.query(Torrent).filter(Torrent.status == TorrentStatus.ERROR).count(),
                 "fresh_emails": s.query(EmailAccount).filter(EmailAccount.status == AccountStatus.FRESH).count(),
-                "fresh_accounts": s.query(TrackerAccount).filter(TrackerAccount.status == AccountStatus.FRESH).count(),
                 "pages_completed": s.query(PageProgress).filter(PageProgress.is_completed == True).count(),
             }

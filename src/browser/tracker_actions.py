@@ -76,55 +76,110 @@ def get_topic_list(page: Page, profile: TrackerProfile, category_id: str, page_n
     return topics
 
 
-def extract_topic_details(page: Page, profile: TrackerProfile, topic_id: str,
-                          download_tags: list, record_tags: list) -> dict:
+def _extract_field(text: str, *patterns: str) -> str:
+    """Try multiple regex patterns on text, return first match group 1."""
+    for pat in patterns:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+    return ""
+
+
+def extract_topic_data(page: Page, profile: TrackerProfile, topic_id: str) -> dict:
     """
-    Open a topic page, extract description, cover image, and match tags.
+    Open a topic page, extract all structured data:
+    description, year, duration, file_size, cover_url, download_url, seeds, peers.
     """
     url = f"{profile.base_url}/forum/viewtopic.php?t={topic_id}"
     page.goto(url, wait_until="domcontentloaded")
     human_delay(1.0, 3.0)
 
     post_body = page.query_selector(profile.post_body_sel)
-    description = post_body.inner_text().strip() if post_body else ""
-    description_lower = description.lower()
+    body_text = post_body.inner_text().strip() if post_body else ""
 
+    # --- Cover image ---
     cover_url = None
     if post_body:
-        img = post_body.query_selector(profile.cover_img_sel)
-        if img:
-            cover_url = img.get_attribute("src") or img.get_attribute("title") or None
+        for sel in profile.cover_img_sel.split(","):
+            sel = sel.strip()
+            img = post_body.query_selector(sel)
+            if img:
+                src = img.get_attribute("title") or img.get_attribute("src") or ""
+                if src and ("http" in src or src.startswith("//")):
+                    cover_url = src
+                    break
 
-    matched_dl = [t for t in download_tags if t.lower() in description_lower]
-    matched_rec = [t for t in record_tags if t.lower() in description_lower]
+    # --- Extract structured fields from body text ---
+    year = _extract_field(
+        body_text,
+        r"(?:Год\s*(?:выпуска|производства)?)\s*[:：]\s*(\d{4})",
+        r"(?:Year)\s*[:：]\s*(\d{4})",
+        r"\b((?:19|20)\d{2})\b",  # fallback: any 4-digit year
+    )
 
-    log.info(f"[{profile.name}] Topic {topic_id}: dl_tags={matched_dl}, rec_tags={matched_rec}")
+    duration = _extract_field(
+        body_text,
+        r"(?:Продолжительность|Длительность|Duration)\s*[:：]\s*([\d:]+\s*(?:мин|min|ч|h|час)?[\d\s:]*)",
+        r"(\d{1,2}:\d{2}:\d{2})",
+        r"(\d{1,3}\s*мин)",
+    )
+
+    file_size = _extract_field(
+        body_text,
+        r"(?:Размер|File\s*size|Size)\s*[:：]\s*([\d.,]+\s*(?:GB|MB|TB|ГБ|МБ|ТБ))",
+        r"([\d.,]+\s*(?:GB|MB|TB|ГБ|МБ|ТБ))",
+    )
+
+    # Description: everything after "Описание:" or first meaningful paragraph
+    description = _extract_field(
+        body_text,
+        r"(?:Описание|Description)\s*[:：]\s*(.+?)(?:\n\n|\Z)",
+    )
+    if not description:
+        description = body_text[:5000]
+
+    # --- Download URL (constructed, not actually downloading) ---
+    dl_path = profile.download_url_tpl.format(topic_id=topic_id)
+    download_url = f"{profile.base_url}{dl_path}"
+
+    # --- Seeds / Peers ---
+    seeds = 0
+    peers = 0
+    try:
+        for sel in profile.seeds_sel.split(","):
+            el = page.query_selector(sel.strip())
+            if el:
+                txt = el.inner_text().strip().replace(",", "").replace(" ", "")
+                if txt.isdigit():
+                    seeds = int(txt)
+                    break
+    except Exception:
+        pass
+    try:
+        for sel in profile.peers_sel.split(","):
+            el = page.query_selector(sel.strip())
+            if el:
+                txt = el.inner_text().strip().replace(",", "").replace(" ", "")
+                if txt.isdigit():
+                    peers = int(txt)
+                    break
+    except Exception:
+        pass
+
+    log.info(
+        f"[{profile.name}] Topic {topic_id}: year={year}, duration={duration}, "
+        f"size={file_size}, seeds={seeds}, peers={peers}"
+    )
     return {
         "description": description[:5000],
         "cover_url": cover_url,
-        "matched_download_tags": matched_dl,
-        "matched_record_tags": matched_rec,
+        "year": year,
+        "duration": duration,
+        "file_size": file_size,
+        "download_url": download_url,
+        "seeds": seeds,
+        "peers": peers,
     }
-
-
-def download_torrent_file(page: Page, profile: TrackerProfile, topic_id: str,
-                          download_dir: Path) -> str | None:
-    """Download .torrent file from topic page. Returns saved path or None."""
-    try:
-        dl_path = profile.download_url_tpl.format(topic_id=topic_id)
-        dl_url = f"{profile.base_url}{dl_path}"
-
-        with page.expect_download(timeout=30000) as dl_info:
-            page.goto(dl_url)
-
-        download = dl_info.value
-        dest = download_dir / f"{topic_id}.torrent"
-        download.save_as(str(dest))
-        log.info(f"[{profile.name}] Downloaded torrent {topic_id} -> {dest}")
-        return str(dest)
-    except Exception as e:
-        log.error(f"[{profile.name}] Failed to download torrent {topic_id}: {e}")
-        return None
 
 
 def download_cover_image(page: Page, cover_url: str, download_dir: Path, topic_id: str) -> str | None:

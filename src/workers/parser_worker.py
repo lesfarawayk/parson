@@ -1,17 +1,18 @@
 """
-Parser worker — all-in-one: takes email → registers on tracker → parses → downloads.
+Parser worker — takes email/account → logs in → scans pages → saves structured data to DB.
 
-Flow per cycle:
-  1. Claim fresh email from DB (thread-safe, no two workers get the same one)
-  2. Register new tracker account using that email (with CAPTCHA via Telegram)
+Flow:
+  1. Claim fresh email from DB (or use as tracker login if skip_registration)
+  2. Optionally register new tracker account
   3. Log in to the tracker
-  4. Scan pages, extract tags, download matching torrents
-  5. When download limit hit → go to step 1 with new email
-  6. Topic queue and page position survive account switches
+  4. Scan category pages, parse titles, filter by format
+  5. For matching topics: open page, extract all data, download cover, save to DB
+  6. No torrent downloading — that's for separate download workers later
 
 Each worker runs in its own visible browser window for debugging.
 """
 
+import json
 import logging
 import random
 import string
@@ -22,10 +23,11 @@ from .base_worker import BaseWorker
 from ..db.repository import Repository
 from ..browser.browser_manager import WorkerBrowser
 from ..browser.tracker_actions import (
-    login, register_on_tracker, get_topic_list, extract_topic_details,
-    download_torrent_file, download_cover_image, human_delay, DomainBannedException,
+    login, register_on_tracker, get_topic_list, extract_topic_data,
+    download_cover_image, human_delay, DomainBannedException,
 )
 from ..browser.tracker_profiles import get_profile, TrackerProfile
+from ..browser.title_parser import parse_title, matches_format_filter
 from ..api.telegram_captcha import TelegramCaptchaSolver
 from ..api.notletters import NotLettersClient
 from ..config_manager import load_config, get_download_dir
@@ -46,32 +48,22 @@ class ParserWorker(BaseWorker):
         super().__init__(worker_id, name=f"Parser-{worker_id}")
         self.repo = repo
         self.proxy = proxy
-        self.browser: WorkerBrowser | None = None  # created in work() thread
+        self.browser: WorkerBrowser | None = None
         self.ctx: BrowserContext | None = None
         self.page = None
-        self.downloads_remaining = 0
         self.captcha_solver: TelegramCaptchaSolver | None = None
         self.notletters: NotLettersClient | None = None
 
-        # Current email being used
         self._current_email_id: int | None = None
-
-        # State that survives account switches
         self._current_page_num: int | None = None
         self._topic_queue: list[dict] = []
-        self._pending_download: dict | None = None
 
-    # ── Account lifecycle: email → register → login ─────────────
+    # ── Account lifecycle ──────────────────────────────────────
 
     def _new_account_cycle(self, cfg: dict, profile: TrackerProfile) -> bool:
-        """
-        Full cycle: take credentials from DB → optionally register → log in.
-        When skip_registration is True, email list is treated as tracker logins.
-        Returns True on success. Email is marked IN_USE atomically (thread-safe).
-        """
+        """Take credentials → optionally register → log in."""
         skip_reg = cfg["tracker"].get("skip_registration", False)
 
-        # Close old browser context
         if self.ctx:
             try:
                 self.ctx.close()
@@ -80,7 +72,6 @@ class ParserWorker(BaseWorker):
             self.ctx = None
             self.page = None
 
-        # 1. Get fresh email/account (thread-safe — claimed atomically)
         email = self.repo.get_fresh_email()
         if not email:
             self._emit_status("No fresh emails — add more in the Emails tab!")
@@ -88,17 +79,13 @@ class ParserWorker(BaseWorker):
 
         self._current_email_id = email.id
         self._emit_status(f"Using: {email.email}")
-
-        # 2. Create browser context (visible window, unique fingerprint)
         self.ctx = self.browser.create_context(proxy=self.proxy)
 
         if skip_reg:
-            # Direct login mode — email:password = tracker login:password
             username = email.email
             password = email.password
             self._emit_status(f"[{profile.name}] Logging in as {username} (skip registration)...")
         else:
-            # Registration mode — register new account, then login
             first_page = self.ctx.new_page()
             first_page.evaluate(f"document.title = 'Worker: {self.worker_id}'")
 
@@ -117,10 +104,9 @@ class ParserWorker(BaseWorker):
                 )
             except DomainBannedException as e:
                 first_page.close()
-                domain = e.domain
-                log.warning(f"Domain '{domain}' blacklisted — banning all emails with this domain")
-                self._emit_status(f"Domain '{domain}' blacklisted — banned")
-                self.repo.add_blocked_domain(domain, reason=f"Blacklisted by {profile.name}")
+                log.warning(f"Domain '{e.domain}' blacklisted")
+                self._emit_status(f"Domain '{e.domain}' blacklisted — banned")
+                self.repo.add_blocked_domain(e.domain, reason=f"Blacklisted by {profile.name}")
                 self.repo.mark_email_used(email.id)
                 try:
                     self.ctx.close()
@@ -141,7 +127,6 @@ class ParserWorker(BaseWorker):
                 self.ctx = None
                 return False
 
-        # Log in
         self._emit_status(f"[{profile.name}] Logging in as {username}...")
         try:
             self.page = login(self.ctx, profile, username, password)
@@ -156,22 +141,18 @@ class ParserWorker(BaseWorker):
             self.ctx = None
             return False
 
-        # Set page title for identification
         try:
             self.page.evaluate(f"document.title = '{self.worker_id} | {username} | ' + document.title")
         except Exception:
             pass
 
-        self.downloads_remaining = cfg["tracker"]["max_downloads_per_account"]
         self.repo.mark_email_used(email.id)
-        self._emit_status(f"Ready: {username} ({self.downloads_remaining} downloads)")
+        self._emit_status(f"Ready: {username}")
         return True
 
     def _ensure_account(self, cfg: dict, profile: TrackerProfile) -> bool:
-        """Ensure we have a working logged-in session. Retry loop."""
-        if self.page is not None and self.downloads_remaining > 0:
+        if self.page is not None:
             return True
-
         while not self.should_stop:
             if self._new_account_cycle(cfg, profile):
                 return True
@@ -179,30 +160,20 @@ class ParserWorker(BaseWorker):
             self._stop_event.wait(timeout=15)
         return False
 
-    def _switch_account(self, cfg: dict, profile: TrackerProfile) -> bool:
-        """Switch to new email+account when download limit hit. Preserves topic queue."""
-        self._emit_status("Download limit reached — getting new email...")
-        self.page = None
-        self.downloads_remaining = 0
-        return self._ensure_account(cfg, profile)
-
-    # ── Main work loop ──────────────────────────────────────────
+    # ── Main work loop ─────────────────────────────────────────
 
     def work(self):
         cfg = load_config()
         tracker_name = cfg["tracker"].get("profile", "rutracker")
         profile = get_profile(tracker_name)
         category_id = cfg["tracker"]["category_id"]
-        download_tags = cfg["tags"]["download_tags"]
-        record_tags = cfg["tags"]["record_tags"]
+        format_filters = cfg["tags"].get("format_filters", cfg["tags"].get("download_tags", []))
         download_dir = get_download_dir(cfg)
 
-        # Init Telegram captcha solver
         tg = cfg.get("telegram", {})
         if tg.get("bot_token") and tg.get("chat_id"):
             self.captcha_solver = TelegramCaptchaSolver(tg["bot_token"], tg["chat_id"])
 
-        # Init NotLetters client for email activation
         nl = cfg.get("notletters", {})
         if nl.get("api_token"):
             self.notletters = NotLettersClient(nl["api_token"])
@@ -211,14 +182,12 @@ class ParserWorker(BaseWorker):
             self._emit_status("No category ID configured")
             return
 
-        # Launch browser in THIS thread (Playwright requirement)
         self.browser = WorkerBrowser(self.worker_id)
         self.browser.start()
 
         try:
-            self._run_parse_loop(cfg, profile, category_id, download_tags, record_tags, download_dir)
+            self._run_parse_loop(cfg, profile, category_id, format_filters, download_dir)
         finally:
-            # Always clean up browser
             if self.ctx:
                 try:
                     self.ctx.close()
@@ -226,8 +195,7 @@ class ParserWorker(BaseWorker):
                     pass
             self.browser.stop()
 
-    def _run_parse_loop(self, cfg, profile, category_id, download_tags, record_tags, download_dir):
-        # Get first account
+    def _run_parse_loop(self, cfg, profile, category_id, format_filters, download_dir):
         if not self._ensure_account(cfg, profile):
             return
 
@@ -235,18 +203,6 @@ class ParserWorker(BaseWorker):
             self.wait_if_paused()
             if self.should_stop:
                 break
-
-            # Handle pending download after account switch
-            if self._pending_download:
-                topic = self._pending_download
-                self._pending_download = None
-                dl_ok = self._do_download(cfg, profile, topic["topic_id"], topic["cover_url"], download_dir)
-                if not dl_ok:
-                    if not self._switch_account(cfg, profile):
-                        break
-                    self._pending_download = topic
-                    continue
-                continue
 
             # Get next page if queue is empty
             if not self._topic_queue:
@@ -274,65 +230,71 @@ class ParserWorker(BaseWorker):
             # Process next topic
             if self._topic_queue:
                 topic = self._topic_queue.pop(0)
-                self._process_topic(cfg, profile, topic, category_id, download_tags, record_tags, download_dir)
+                self._process_topic(profile, topic, category_id, format_filters, download_dir)
 
         # Release unfinished page
         if self._current_page_num is not None and self._topic_queue:
             self.repo.release_page(category_id, self.worker_id)
 
-    # ── Topic processing ────────────────────────────────────────
+    # ── Topic processing ───────────────────────────────────────
 
-    def _process_topic(self, cfg, profile, topic, category_id, download_tags, record_tags, download_dir):
+    def _process_topic(self, profile, topic, category_id, format_filters, download_dir):
         topic_id = topic["topic_id"]
         title = topic["title"]
 
-        t = self.repo.add_torrent(topic_id, title, category_id, self._current_page_num)
-        if t is None:
+        # Skip if already in DB
+        if self.repo.torrent_exists(topic_id):
             return
 
-        self._emit_status(f"Topic {topic_id}: {title[:50]}...")
+        # 1. Parse title: [Studio]Name[Tags/Formats][Devices]
+        parsed = parse_title(title)
 
+        # 2. Check if formats match the filter
+        if format_filters and not matches_format_filter(parsed["formats"], format_filters):
+            log.debug(f"Topic {topic_id}: formats {parsed['formats']} don't match filter, skipping")
+            return
+
+        self._emit_status(f"Topic {topic_id}: {parsed['film_name'][:40]}...")
+
+        # 3. Open topic page and extract all data
         try:
-            details = extract_topic_details(self.page, profile, topic_id, download_tags, record_tags)
+            details = extract_topic_data(self.page, profile, topic_id)
         except Exception as e:
             self.log.error(f"Failed to extract topic {topic_id}: {e}")
-            self.repo.mark_torrent_error(topic_id)
             return
 
-        self.repo.update_torrent_tags(
-            topic_id,
-            details["matched_download_tags"],
-            details["matched_record_tags"],
-            details["description"],
-            details["cover_url"],
-        )
+        # 4. Download cover image
+        cover_path = None
+        if details["cover_url"]:
+            cover_path = download_cover_image(self.page, details["cover_url"], download_dir, topic_id)
 
-        if details["matched_download_tags"]:
-            if self.downloads_remaining <= 0:
-                self._pending_download = {"topic_id": topic_id, "cover_url": details["cover_url"]}
-                if not self._switch_account(cfg, profile):
-                    return
-                return
+        # 5. Save everything to DB
+        data = {
+            "topic_id": topic_id,
+            "title_raw": title,
+            "category_id": category_id,
+            "page_number": self._current_page_num or 0,
+            "studio": parsed["studio"],
+            "film_name": parsed["film_name"],
+            "tags": parsed["tags"],
+            "formats": parsed["formats"],
+            "devices": parsed["devices"],
+            "year": details["year"],
+            "description": details["description"],
+            "duration": details["duration"],
+            "file_size": details["file_size"],
+            "cover_url": details["cover_url"],
+            "cover_path": cover_path,
+            "download_url": details["download_url"],
+            "seeds": details["seeds"],
+            "peers": details["peers"],
+        }
 
-            self._do_download(cfg, profile, topic_id, details["cover_url"], download_dir)
+        t = self.repo.save_torrent_data(data)
+        if t:
+            self._emit_status(
+                f"Saved: {parsed['film_name'][:30]} | "
+                f"formats={parsed['formats']} seeds={details['seeds']}"
+            )
 
         human_delay(0.5, 1.5)
-
-    def _do_download(self, cfg, profile, topic_id, cover_url, download_dir) -> bool:
-        if self.downloads_remaining <= 0:
-            return False
-
-        self.repo.mark_torrent_downloading(topic_id)
-        self._emit_status(f"Downloading {topic_id}...")
-
-        file_path = download_torrent_file(self.page, profile, topic_id, download_dir)
-        if file_path:
-            cover_path = download_cover_image(self.page, cover_url, download_dir, topic_id)
-            self.repo.mark_torrent_downloaded(topic_id, file_path, cover_path)
-            self.downloads_remaining -= 1
-            self._emit_status(f"Downloaded {topic_id} ({self.downloads_remaining} left)")
-            return True
-        else:
-            self.repo.mark_torrent_error(topic_id)
-            self._emit_status(f"Download failed: {topic_id}")
-            return True

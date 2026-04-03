@@ -22,11 +22,13 @@ class AccountStatus(enum.Enum):
 
 
 class TorrentStatus(enum.Enum):
-    FOUND = "found"           # seen in listing, not yet processed
-    TAGGED = "tagged"         # tags extracted, not downloading
+    FOUND = "found"           # seen in listing, not yet opened
+    PARSED = "parsed"         # data extracted, awaiting moderation
+    APPROVED = "approved"     # approved for download by moderator
+    REJECTED = "rejected"     # rejected
     DOWNLOADING = "downloading"
     DOWNLOADED = "downloaded"
-    SKIPPED = "skipped"
+    SKIPPED = "skipped"       # format didn't match filter
     ERROR = "error"
 
 
@@ -85,21 +87,35 @@ class Torrent(Base):
 
     id = Column(Integer, primary_key=True)
     topic_id = Column(String(50), unique=True, nullable=False)
-    title = Column(String(1000), nullable=False)
+    title_raw = Column(String(1000), nullable=False)   # original title from listing
     category_id = Column(String(50), nullable=False)
     page_number = Column(Integer, nullable=False)
     status = Column(SAEnum(TorrentStatus), default=TorrentStatus.FOUND)
 
+    # Parsed from title: [Studio]Name[Tags/Genres/Formats][Devices]
+    studio = Column(String(500), nullable=True)
+    film_name = Column(String(500), nullable=True)
+    tags = Column(Text, nullable=True)          # JSON — genres/tags (without formats)
+    formats = Column(Text, nullable=True)       # JSON — normalized video formats
+    devices = Column(Text, nullable=True)       # JSON — devices (VR, Oculus, etc.)
+
+    # Extracted from topic page body
+    year = Column(String(10), nullable=True)
     description = Column(Text, nullable=True)
+    duration = Column(String(50), nullable=True)
+    file_size = Column(String(50), nullable=True)
+
+    # Media
     cover_url = Column(String(1000), nullable=True)
     cover_path = Column(String(1000), nullable=True)
-    file_path = Column(String(1000), nullable=True)
 
-    download_tags = Column(Text, nullable=True)   # JSON list of matched download tags
-    record_tags = Column(Text, nullable=True)      # JSON list of matched record tags
+    # Torrent info (saved, not actually downloaded by parser workers)
+    download_url = Column(String(1000), nullable=True)
+    seeds = Column(Integer, nullable=True)
+    peers = Column(Integer, nullable=True)
 
     discovered_at = Column(DateTime, default=datetime.utcnow)
-    downloaded_at = Column(DateTime, nullable=True)
+    downloaded_at = Column(DateTime, nullable=True)   # for download workers later
 
 
 def init_db():

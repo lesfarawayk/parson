@@ -45,7 +45,9 @@ PROFILES = {
 
         # Topic details
         post_body_sel=".post_body, #topic_main .post_wrap .post_body",
-        cover_img_sel="img, var.postImg",
+        cover_img_sel="var.postImg, img.postImg, .postImg img, img[src*='pic'], img",
+        seeds_sel="span.seed b, b.seedmed, .seed",
+        peers_sel="span.leech b, b.leechmed, .leech",
 
         # Download
         download_url_tpl="/forum/dl.php?t={topic_id}",
@@ -82,7 +84,9 @@ PROFILES = {
 
         # Topic details
         post_body_sel=".post_body, #topic_main .post_wrap .post_body, .post_wrap .post_body",
-        cover_img_sel="img, var.postImg",
+        cover_img_sel="var.postImg, img.postImg, .postImg img, img[src*='pic'], img",
+        seeds_sel="span.seed b, b.seedmed, .seed",
+        peers_sel="span.leech b, b.leechmed, .leech",
 
         # Download
         download_url_tpl="/forum/dl.php?t={topic_id}",
