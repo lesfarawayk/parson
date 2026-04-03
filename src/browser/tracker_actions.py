@@ -60,6 +60,8 @@ def get_topic_list(page: Page, profile: TrackerProfile, category_id: str, page_n
     human_delay(1.0, 3.0)
 
     topics = []
+
+    # Strategy 1: profile selectors (row → link inside row)
     rows = page.query_selector_all(profile.topic_row_sel)
     for row in rows:
         link = row.query_selector(profile.topic_link_sel)
@@ -71,6 +73,45 @@ def get_topic_list(page: Page, profile: TrackerProfile, category_id: str, page_n
         match = re.search(profile.topic_id_pattern, href)
         if match:
             topics.append({"topic_id": match.group(1), "title": title})
+
+    # Strategy 2: broad fallback — find all links to viewtopic.php
+    if not topics:
+        log.warning(
+            f"[{profile.name}] Page {page_number}: profile selectors found 0 rows. "
+            f"Trying broad fallback (a[href*='viewtopic'])..."
+        )
+        # Debug: dump what the page actually contains
+        try:
+            sample = page.evaluate("""() => {
+                const trs = document.querySelectorAll('tr');
+                const sample = Array.from(trs).slice(0, 5).map(tr => ({
+                    classes: tr.className,
+                    id: tr.id,
+                    firstTd: tr.querySelector('td')?.className || '',
+                }));
+                const links = document.querySelectorAll('a[href*="viewtopic"]');
+                return {
+                    total_trs: trs.length,
+                    sample_trs: sample,
+                    viewtopic_links: links.length,
+                    url: location.href,
+                };
+            }""")
+            log.info(f"[{profile.name}] Page debug: {sample}")
+        except Exception:
+            pass
+
+        all_links = page.query_selector_all("a[href*='viewtopic']")
+        seen_ids = set()
+        for link in all_links:
+            href = link.get_attribute("href") or ""
+            title = link.inner_text().strip()
+            if not title or len(title) < 5:
+                continue
+            match = re.search(profile.topic_id_pattern, href)
+            if match and match.group(1) not in seen_ids:
+                seen_ids.add(match.group(1))
+                topics.append({"topic_id": match.group(1), "title": title})
 
     log.info(f"[{profile.name}] Page {page_number}: found {len(topics)} topics")
     return topics

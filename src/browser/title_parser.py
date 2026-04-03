@@ -9,6 +9,7 @@ import re
 # Canonical format → list of aliases (all lowercase)
 FORMAT_GROUPS = [
     ("8K",    ["8k", "4320p", "7680x4320"]),
+    ("7K",    ["7k"]),
     ("4K",    ["4k", "2160p", "3840x2160", "uhd"]),
     ("2K",    ["2k", "1440p", "2560x1440", "qhd"]),
     ("1080p", ["1080p", "fhd", "1920x1080"]),
@@ -16,9 +17,17 @@ FORMAT_GROUPS = [
     ("480p",  ["480p"]),
     ("360p",  ["360p"]),
     ("VR",    ["vr"]),
-    # Non-standard resolutions from user config
+    # Non-standard resolutions
+    ("4096p", ["4096p"]),
+    ("3840p", ["3840p"]),
+    ("3600p", ["3600p"]),
+    ("3584p", ["3584p"]),
     ("3080p", ["3080p"]),
+    ("3072p", ["3072p"]),
     ("3000p", ["3000p"]),
+    ("2880p", ["2880p"]),
+    ("2700p", ["2700p"]),
+    ("2048p", ["2048p"]),
 ]
 
 # Build lookup: alias(lower) → canonical name
@@ -92,6 +101,21 @@ def parse_title(title: str) -> dict:
             formats.append(token)
         else:
             genres.append(token)
+
+    # Also scan the ENTIRE raw title for resolution patterns not in brackets
+    # This catches titles like "Film Name 3840p Something" without brackets
+    for m in re.finditer(r'\b(\d{3,5}p)\b', title, re.IGNORECASE):
+        token = m.group(1)
+        if token.lower() not in {f.lower() for f in formats}:
+            formats.append(token)
+    for m in re.finditer(r'\b(\d{3,5}x\d{3,5})\b', title):
+        token = m.group(0)
+        if token.lower() not in {f.lower() for f in formats}:
+            formats.append(token)
+    for m in re.finditer(r'\b([4-9]K|[1-9]\d+K)\b', title, re.IGNORECASE):
+        token = m.group(0)
+        if token.lower() not in {f.lower() for f in formats}:
+            formats.append(token)
 
     formats = deduplicate_formats(formats)
 
