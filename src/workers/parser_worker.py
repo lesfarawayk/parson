@@ -276,6 +276,7 @@ class ParserWorker(BaseWorker):
             "page_number": self._current_page_num or 0,
             "studio": parsed["studio"],
             "film_name": parsed["film_name"],
+            "actors": parsed["actors"],
             "tags": parsed["tags"],
             "formats": parsed["formats"],
             "devices": parsed["devices"],

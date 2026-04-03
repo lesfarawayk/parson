@@ -77,8 +77,30 @@ def parse_title(title: str) -> dict:
     studio = bracket_contents[0] if bracket_contents else ""
 
     # Film name = text after first ], before next [
-    film_name = text_parts[1] if len(text_parts) > 1 else (text_parts[0] if text_parts else "")
-    film_name = film_name.strip(" -\u2013\u2014/")
+    raw_name = text_parts[1] if len(text_parts) > 1 else (text_parts[0] if text_parts else "")
+    raw_name = raw_name.strip(" -\u2013\u2014/")
+
+    # Parse "Actress1, Actress2 - Film Name" pattern
+    # The dash separates actors from the actual film title
+    actors = []
+    film_name = raw_name
+    # Try splitting by " - " (with spaces around dash)
+    dash_match = re.split(r'\s+[-\u2013\u2014]\s+', raw_name, maxsplit=1)
+    if len(dash_match) == 2:
+        left, right = dash_match
+        # Left part is actors if it looks like a comma-separated list of names
+        # (capitalized words, no digits, reasonable length)
+        left_parts = [p.strip() for p in left.split(",") if p.strip()]
+        if left_parts and all(
+            re.match(r'^[A-Z\u0400-\u04FF]', p) and len(p) < 50 and not re.search(r'\d', p)
+            for p in left_parts
+        ):
+            actors = left_parts
+            film_name = right.strip(" -\u2013\u2014/")
+        else:
+            film_name = raw_name
+    else:
+        film_name = raw_name
 
     # All remaining bracket groups contain tags/formats/devices
     tag_groups = bracket_contents[1:] if len(bracket_contents) > 1 else []
@@ -137,6 +159,7 @@ def parse_title(title: str) -> dict:
     return {
         "studio": studio,
         "film_name": film_name,
+        "actors": actors,
         "formats": formats,
         "tags": genres,
         "devices": devices,

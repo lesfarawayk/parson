@@ -24,17 +24,18 @@ DB_DEFAULT = Path(__file__).resolve().parent / "data" / "parson.db"
 COLUMNS = [
     ("id", "ID", 50),
     ("topic_id", "Topic", 70),
-    ("studio", "Studio", 140),
-    ("film_name", "Film Name", 250),
-    ("year", "Year", 50),
-    ("formats", "Formats", 100),
-    ("tags", "Tags", 180),
-    ("devices", "Devices", 80),
-    ("duration", "Duration", 70),
-    ("file_size", "Size", 70),
-    ("seeds", "Seeds", 50),
-    ("peers", "Peers", 50),
-    ("status", "Status", 80),
+    ("studio", "Studio", 120),
+    ("actors", "Actors", 150),
+    ("film_name", "Film Name", 220),
+    ("year", "Year", 45),
+    ("formats", "Formats", 90),
+    ("tags", "Tags", 160),
+    ("devices", "Devices", 70),
+    ("duration", "Duration", 65),
+    ("file_size", "Size", 65),
+    ("seeds", "Seeds", 45),
+    ("peers", "Peers", 45),
+    ("status", "Status", 70),
 ]
 
 STATUS_COLORS = {
@@ -114,6 +115,12 @@ class DBViewer(QMainWindow):
 
         self.lbl_count = QLabel("")
         filt.addWidget(self.lbl_count)
+        filt.addStretch()
+
+        btn_clear = QPushButton("Clear Database")
+        btn_clear.clicked.connect(self._on_clear_db)
+        filt.addWidget(btn_clear)
+
         root.addLayout(filt)
 
         # --- Splitter: table + details ---
@@ -124,8 +131,8 @@ class DBViewer(QMainWindow):
         self.table.setHorizontalHeaderLabels([c[1] for c in COLUMNS])
         for i, (_, _, w) in enumerate(COLUMNS):
             self.table.setColumnWidth(i, w)
-        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)  # Film Name
-        self.table.horizontalHeader().setSectionResizeMode(6, QHeaderView.Stretch)  # Tags
+        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)  # Film Name
+        self.table.horizontalHeader().setSectionResizeMode(7, QHeaderView.Stretch)  # Tags
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setAlternatingRowColors(True)
@@ -214,6 +221,7 @@ class DBViewer(QMainWindow):
             for r in self._rows:
                 searchable = " ".join([
                     str(r.get("studio", "")),
+                    str(r.get("actors", "")),
                     str(r.get("film_name", "")),
                     str(r.get("tags", "")),
                     str(r.get("title_raw", "")),
@@ -239,7 +247,7 @@ class DBViewer(QMainWindow):
                 if raw is None:
                     raw = ""
                 # Pretty-print JSON columns
-                if key in ("formats", "tags", "devices"):
+                if key in ("formats", "tags", "devices", "actors"):
                     text = _json_pretty(str(raw))
                 else:
                     text = str(raw)
@@ -286,6 +294,7 @@ class DBViewer(QMainWindow):
             f"{'Title raw:':<16} {r.get('title_raw', '')}",
             f"",
             f"{'Studio:':<16} {r.get('studio', '')}",
+            f"{'Actors:':<16} {_json_pretty(str(r.get('actors', '')))}",
             f"{'Film:':<16} {r.get('film_name', '')}",
             f"{'Year:':<16} {r.get('year', '')}",
             f"{'Duration:':<16} {r.get('duration', '')}",
@@ -309,6 +318,24 @@ class DBViewer(QMainWindow):
             str(r.get("description", ""))[:2000],
         ]
         self.detail_text.setPlainText("\n".join(lines))
+
+    def _on_clear_db(self):
+        if not self.conn:
+            return
+        reply = QMessageBox.question(
+            self, "Clear Database",
+            "Delete ALL parsed torrents and reset page progress?\nThis cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            try:
+                self.conn.execute("DELETE FROM torrents")
+                self.conn.execute("DELETE FROM page_progress")
+                self.conn.commit()
+                QMessageBox.information(self, "Done", "Database cleared.")
+                self._load_data()
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed: {e}")
 
     def closeEvent(self, event):
         if self.conn:

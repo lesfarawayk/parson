@@ -298,6 +298,7 @@ class Repository:
                 status=TorrentStatus.PARSED,
                 studio=data.get("studio", ""),
                 film_name=data.get("film_name", ""),
+                actors=json.dumps(data.get("actors", []), ensure_ascii=False),
                 tags=json.dumps(data.get("tags", []), ensure_ascii=False),
                 formats=json.dumps(data.get("formats", []), ensure_ascii=False),
                 devices=json.dumps(data.get("devices", []), ensure_ascii=False),
@@ -335,6 +336,7 @@ class Repository:
                     "topic_id": t.topic_id,
                     "studio": t.studio or "",
                     "film_name": t.film_name or "",
+                    "actors": t.actors or "[]",
                     "year": t.year or "",
                     "formats": t.formats or "[]",
                     "tags": t.tags or "[]",
@@ -360,6 +362,17 @@ class Repository:
                     s.commit()
                 except ValueError:
                     pass
+
+    def clear_all_torrents(self) -> int:
+        """Delete all torrents from DB. Returns count deleted."""
+        with _lock:
+            s = self._session()
+            count = s.query(Torrent).count()
+            s.query(Torrent).delete()
+            # Also reset page progress so pages can be re-scanned
+            s.query(PageProgress).delete()
+            s.commit()
+            return count
 
     def mark_torrent_error(self, topic_id: str):
         with _lock:

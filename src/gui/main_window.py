@@ -133,19 +133,23 @@ class MainWindow(QMainWindow):
         ctrl.addWidget(QLabel("Filter:"))
         ctrl.addWidget(self.db_filter)
         ctrl.addWidget(btn_refresh)
+        btn_clear_db = QPushButton("Clear Database")
+        btn_clear_db.clicked.connect(self._on_clear_database)
+
         ctrl.addWidget(self.db_count_label)
         ctrl.addStretch()
+        ctrl.addWidget(btn_clear_db)
         layout.addLayout(ctrl)
 
         # Main table
         columns = [
-            "ID", "Studio", "Film Name", "Year", "Formats",
+            "ID", "Studio", "Actors", "Film Name", "Year", "Formats",
             "Tags", "Duration", "Size", "Seeds", "Peers", "Status",
         ]
         self.db_table = QTableWidget(0, len(columns))
         self.db_table.setHorizontalHeaderLabels(columns)
-        self.db_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)  # Film Name
-        self.db_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)  # Tags
+        self.db_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)  # Film Name
+        self.db_table.horizontalHeader().setSectionResizeMode(6, QHeaderView.Stretch)  # Tags
         self.db_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.db_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.db_table.setAlternatingRowColors(True)
@@ -186,23 +190,25 @@ class MainWindow(QMainWindow):
 
         self._db_rows_data = rows  # save for detail view
 
-        for row_idx, r in enumerate(rows):
+        def _jp(raw):
+            """JSON list → comma string."""
+            if not raw or raw == "[]":
+                return ""
             try:
-                formats_str = ", ".join(json.loads(r["formats"])) if r["formats"] != "[]" else ""
+                items = json.loads(raw)
+                return ", ".join(str(i) for i in items) if isinstance(items, list) else raw
             except Exception:
-                formats_str = r["formats"]
-            try:
-                tags_str = ", ".join(json.loads(r["tags"])) if r["tags"] != "[]" else ""
-            except Exception:
-                tags_str = r["tags"]
+                return str(raw)
 
+        for row_idx, r in enumerate(rows):
             cells = [
                 str(r["topic_id"]),
                 r["studio"],
+                _jp(r.get("actors", "[]")),
                 r["film_name"],
                 r["year"],
-                formats_str,
-                tags_str,
+                _jp(r["formats"]),
+                _jp(r["tags"]),
                 r["duration"],
                 r["file_size"],
                 str(r["seeds"]),
@@ -227,8 +233,13 @@ class MainWindow(QMainWindow):
             devices = ", ".join(json.loads(r["devices"])) if r["devices"] != "[]" else ""
         except Exception:
             devices = r["devices"]
+        try:
+            actors = ", ".join(json.loads(r.get("actors", "[]"))) if r.get("actors", "[]") != "[]" else ""
+        except Exception:
+            actors = r.get("actors", "")
         lines = [
             f"Topic ID: {r['topic_id']}    Studio: {r['studio']}    Year: {r['year']}",
+            f"Actors: {actors}",
             f"Film: {r['film_name']}",
             f"Devices: {devices}    Size: {r['file_size']}    Duration: {r['duration']}",
             f"Seeds: {r['seeds']}  Peers: {r['peers']}",
@@ -236,6 +247,18 @@ class MainWindow(QMainWindow):
             f"Cover: {r['cover_path'] or r.get('cover_url', '')}",
         ]
         self.db_detail.setPlainText("\n".join(lines))
+
+    def _on_clear_database(self):
+        reply = QMessageBox.question(
+            self, "Clear Database",
+            "Delete ALL parsed torrents and reset page progress?\n"
+            "This cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            count = self.coordinator.repo.clear_all_torrents()
+            QMessageBox.information(self, "Done", f"Deleted {count} torrents, page progress reset.")
+            self._refresh_db_table()
 
     # ── Emails tab ──────────────────────────────────────────────
 

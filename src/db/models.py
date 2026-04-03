@@ -95,9 +95,10 @@ class Torrent(Base):
     # Parsed from title: [Studio]Name[Tags/Genres/Formats][Devices]
     studio = Column(String(500), nullable=True)
     film_name = Column(String(500), nullable=True)
-    tags = Column(Text, nullable=True)          # JSON — genres/tags (without formats)
-    formats = Column(Text, nullable=True)       # JSON — normalized video formats
-    devices = Column(Text, nullable=True)       # JSON — devices (VR, Oculus, etc.)
+    actors = Column(Text, nullable=True)           # JSON — actor names parsed from title
+    tags = Column(Text, nullable=True)             # JSON — genres/tags (without formats)
+    formats = Column(Text, nullable=True)          # JSON — normalized video formats
+    devices = Column(Text, nullable=True)          # JSON — devices (VR, Oculus, etc.)
 
     # Extracted from topic page body
     year = Column(String(10), nullable=True)
@@ -130,7 +131,7 @@ def init_db():
             cols = [row[1] for row in conn.execute(
                 __import__("sqlalchemy").text("PRAGMA table_info(torrents)")
             )]
-            if cols and "title_raw" not in cols:
+            if cols and ("title_raw" not in cols or "actors" not in cols):
                 conn.execute(__import__("sqlalchemy").text("DROP TABLE torrents"))
                 conn.commit()
         except Exception:
