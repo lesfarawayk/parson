@@ -203,15 +203,60 @@ def register_on_tracker(ctx: BrowserContext, profile: TrackerProfile,
         page.goto(f"{profile.base_url}{profile.register_url}", wait_until="domcontentloaded")
         human_delay(2, 4)
 
-        # Accept rules
+        # Accept rules — TorrentPier shows rules page first with agree button
+        # Try multiple strategies to find and click the agree button
+        agreed = False
         try:
+            # Strategy 1: selector from profile
             agree_btn = page.query_selector(profile.reg_agree_sel)
-            if agree_btn:
+            if agree_btn and agree_btn.is_visible():
                 agree_btn.click()
-                page.wait_for_load_state("domcontentloaded")
-                human_delay(1, 2)
+                agreed = True
         except Exception:
             pass
+
+        if not agreed:
+            try:
+                # Strategy 2: find by Russian text "Я согласен"
+                page.click("text=Я согласен", timeout=5000)
+                agreed = True
+            except Exception:
+                pass
+
+        if not agreed:
+            try:
+                # Strategy 3: find any submit/button with agree-like text
+                page.click("input[value*='согласен'], input[value*='Agree'], input[name='agreed']", timeout=5000)
+                agreed = True
+            except Exception:
+                pass
+
+        if not agreed:
+            try:
+                # Strategy 4: find link with agree text
+                page.click("a:has-text('согласен'), a:has-text('Agree')", timeout=5000)
+                agreed = True
+            except Exception:
+                pass
+
+        if agreed:
+            page.wait_for_load_state("domcontentloaded")
+            human_delay(2, 3)
+            if status_callback:
+                status_callback("Rules accepted, filling form...")
+        else:
+            # Maybe there's no rules page, form is shown directly
+            log.info(f"[{profile.name}] No agree button found — maybe form is shown directly")
+
+        # Wait for the registration form to appear
+        try:
+            page.wait_for_selector(profile.reg_user_sel, timeout=10000)
+        except Exception:
+            if status_callback:
+                status_callback("Registration form not found — check browser window")
+            log.error(f"[{profile.name}] Cannot find registration form fields")
+            page.close()
+            return False
 
         # Fill form
         page.fill(profile.reg_user_sel, username)
