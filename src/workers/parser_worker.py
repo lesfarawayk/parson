@@ -20,7 +20,7 @@ from playwright.sync_api import BrowserContext
 
 from .base_worker import BaseWorker
 from ..db.repository import Repository
-from ..browser.browser_manager import BrowserManager
+from ..browser.browser_manager import WorkerBrowser
 from ..browser.tracker_actions import (
     login, register_on_tracker, get_topic_list, extract_topic_details,
     download_torrent_file, download_cover_image, human_delay,
@@ -41,12 +41,11 @@ def _random_password(length=12) -> str:
 
 
 class ParserWorker(BaseWorker):
-    def __init__(self, worker_id: str, browser_manager: BrowserManager, repo: Repository,
-                 proxy: dict | None = None):
+    def __init__(self, worker_id: str, repo: Repository, proxy: dict | None = None):
         super().__init__(worker_id, name=f"Parser-{worker_id}")
-        self.browser = browser_manager
         self.repo = repo
         self.proxy = proxy
+        self.browser: WorkerBrowser | None = None  # created in work() thread
         self.ctx: BrowserContext | None = None
         self.page = None
         self.downloads_remaining = 0
@@ -181,6 +180,22 @@ class ParserWorker(BaseWorker):
             self._emit_status("No category ID configured")
             return
 
+        # Launch browser in THIS thread (Playwright requirement)
+        self.browser = WorkerBrowser(self.worker_id)
+        self.browser.start()
+
+        try:
+            self._run_parse_loop(cfg, profile, category_id, download_tags, record_tags, download_dir)
+        finally:
+            # Always clean up browser
+            if self.ctx:
+                try:
+                    self.ctx.close()
+                except Exception:
+                    pass
+            self.browser.stop()
+
+    def _run_parse_loop(self, cfg, profile, category_id, download_tags, record_tags, download_dir):
         # Get first account
         if not self._ensure_account(cfg, profile):
             return
@@ -230,14 +245,9 @@ class ParserWorker(BaseWorker):
                 topic = self._topic_queue.pop(0)
                 self._process_topic(cfg, profile, topic, category_id, download_tags, record_tags, download_dir)
 
-        # Cleanup
+        # Release unfinished page
         if self._current_page_num is not None and self._topic_queue:
             self.repo.release_page(category_id, self.worker_id)
-        if self.ctx:
-            try:
-                self.ctx.close()
-            except Exception:
-                pass
 
     # ── Topic processing ────────────────────────────────────────
 

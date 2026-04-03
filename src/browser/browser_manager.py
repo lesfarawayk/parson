@@ -1,21 +1,30 @@
-"""Browser manager — creates Playwright browser contexts with visible windows, proxy, and fingerprint spoofing."""
+"""
+Browser manager — each worker gets its own Playwright + Browser instance.
+
+Playwright's sync API is bound to the thread that created it (greenlet).
+Since workers run in separate threads, each must own its own Playwright instance.
+"""
 
 import logging
-from playwright.sync_api import sync_playwright, Browser, BrowserContext, Page
+from playwright.sync_api import sync_playwright, Browser, BrowserContext
 from .fingerprint import generate_fingerprint, build_stealth_script
 
 log = logging.getLogger(__name__)
 
 
-class BrowserManager:
-    """Manages a Playwright Chromium instance with multiple contexts (one per worker)."""
+class WorkerBrowser:
+    """
+    Per-worker browser instance. Must be created AND used in the same thread.
+    Call start() at the beginning of work(), stop() at the end.
+    """
 
-    def __init__(self):
+    def __init__(self, worker_id: str):
+        self.worker_id = worker_id
         self._pw = None
         self._browser: Browser | None = None
 
     def start(self):
-        """Launch the browser (headed mode so the user can see the windows)."""
+        """Launch Playwright + Chromium in this thread."""
         self._pw = sync_playwright().start()
         self._browser = self._pw.chromium.launch(
             headless=False,
@@ -24,13 +33,10 @@ class BrowserManager:
                 "--no-sandbox",
             ],
         )
-        log.info("Browser launched (headed mode)")
+        log.info(f"[{self.worker_id}] Browser launched")
 
     def create_context(self, proxy: dict | None = None) -> BrowserContext:
-        """
-        Create a new isolated browser context with a unique fingerprint.
-        proxy format: {"server": "http://host:port", "username": "u", "password": "p"}
-        """
+        """Create a new isolated browser context with a unique fingerprint."""
         fp = generate_fingerprint()
 
         opts = {
@@ -45,14 +51,11 @@ class BrowserManager:
             opts["proxy"] = proxy
 
         ctx = self._browser.new_context(**opts)
-
-        # Inject stealth + fingerprint overrides before any page loads
         ctx.add_init_script(build_stealth_script(fp))
 
         log.info(
-            f"Context created: {fp['user_agent'][:60]}... | "
-            f"{fp['screen']['width']}x{fp['screen']['height']} | "
-            f"{fp['timezone_id']} | {fp['webgl_renderer'][:40]}..."
+            f"[{self.worker_id}] Context: {fp['user_agent'][:50]}... | "
+            f"{fp['screen']['width']}x{fp['screen']['height']} | {fp['timezone_id']}"
         )
         return ctx
 
@@ -68,4 +71,4 @@ class BrowserManager:
                 self._pw.stop()
             except Exception:
                 pass
-        log.info("Browser stopped")
+        log.info(f"[{self.worker_id}] Browser stopped")

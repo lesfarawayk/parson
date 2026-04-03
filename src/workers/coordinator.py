@@ -1,14 +1,13 @@
 """
 Worker coordinator — manages the lifecycle of parser workers.
 
-Simplified: no separate email/account workers.
-Parser workers handle everything: take email → register on tracker → parse.
+Each worker creates its own Playwright + browser (thread requirement).
+No shared browser manager needed.
 """
 
 import logging
 from typing import Callable
 
-from ..browser.browser_manager import BrowserManager
 from ..db.repository import Repository
 from ..config_manager import load_config
 from .parser_worker import ParserWorker
@@ -20,17 +19,14 @@ log = logging.getLogger(__name__)
 class WorkerCoordinator:
     def __init__(self):
         self.repo = Repository()
-        self.browser_manager = BrowserManager()
         self.workers: list[BaseWorker] = []
         self._status_callback: Callable | None = None
         self._running = False
 
     def set_status_callback(self, cb: Callable):
-        """Set a callback: cb(worker_id, state, message)."""
         self._status_callback = cb
 
     def _get_proxy(self, index: int) -> dict | None:
-        """Get proxy for worker by index from config."""
         cfg = load_config()
         if not cfg["proxy"]["enabled"]:
             return None
@@ -47,42 +43,36 @@ class WorkerCoordinator:
             return {"server": proxy_str}
 
     def start(self):
-        """Launch browser and parser workers."""
+        """Launch parser workers (each starts its own browser)."""
         if self._running:
             return
         self._running = True
         cfg = load_config()
 
-        # Check we have emails
         stats = self.repo.get_stats()
         if stats["fresh_emails"] == 0:
             log.warning("No fresh emails in DB — add emails before starting!")
 
-        log.info("Starting browser...")
-        self.browser_manager.start()
-
-        # Start parser workers only
         for i in range(cfg["workers"].get("parser_count", 3)):
             wid = f"parser-{i}"
-            w = ParserWorker(wid, self.browser_manager, self.repo, proxy=self._get_proxy(i))
+            w = ParserWorker(wid, self.repo, proxy=self._get_proxy(i))
             if self._status_callback:
                 w.add_status_callback(self._status_callback)
             self.workers.append(w)
             w.start()
 
-        log.info(f"Started {len(self.workers)} parser workers")
+        log.info(f"Started {len(self.workers)} parser workers (each with own browser)")
 
     def stop(self):
-        """Gracefully stop all workers and the browser."""
+        """Gracefully stop all workers (each cleans up its own browser)."""
         if not self._running:
             return
         log.info("Stopping all workers...")
         for w in self.workers:
             w.request_stop()
         for w in self.workers:
-            w.join(timeout=15)
+            w.join(timeout=30)
         self.workers.clear()
-        self.browser_manager.stop()
         self._running = False
         log.info("All workers stopped")
 
@@ -99,11 +89,7 @@ class WorkerCoordinator:
 
     def get_worker_statuses(self) -> list[dict]:
         return [
-            {
-                "id": w.worker_id,
-                "state": w.state.value,
-                "message": w.status_message,
-            }
+            {"id": w.worker_id, "state": w.state.value, "message": w.status_message}
             for w in self.workers
         ]
 
