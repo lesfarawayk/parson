@@ -248,31 +248,67 @@ def register_on_tracker(ctx: BrowserContext, profile: TrackerProfile,
             # Maybe there's no rules page, form is shown directly
             log.info(f"[{profile.name}] No agree button found — maybe form is shown directly")
 
-        # Wait for the registration form to appear
-        try:
-            page.wait_for_selector(profile.reg_user_sel, timeout=10000)
-        except Exception:
-            if status_callback:
-                status_callback("Registration form not found — check browser window")
-            log.error(f"[{profile.name}] Cannot find registration form fields")
-            page.close()
+        # Debug: dump all form fields so we can see what's on the page
+        fields = page.evaluate("""() => {
+            const inputs = document.querySelectorAll('input, select, textarea');
+            return Array.from(inputs).map(el => ({
+                tag: el.tagName,
+                type: el.type || '',
+                name: el.name || '',
+                id: el.id || '',
+                value: el.value || '',
+                placeholder: el.placeholder || '',
+            }));
+        }""")
+        log.info(f"[{profile.name}] Registration form fields: {fields}")
+
+        # Fill form fields — try each with fallback to generic selectors
+        def fill_field(selectors, value, field_name):
+            for sel in selectors.split(","):
+                sel = sel.strip()
+                try:
+                    el = page.query_selector(sel)
+                    if el and el.is_visible():
+                        el.fill(value)
+                        log.info(f"Filled {field_name} via {sel}")
+                        return True
+                except Exception:
+                    continue
+            # Fallback: try all text inputs in order
+            log.warning(f"Could not fill {field_name} with selectors: {selectors}")
             return False
 
-        # Fill form
-        page.fill(profile.reg_user_sel, username)
+        fill_field(profile.reg_user_sel, username, "username")
         human_delay(0.3, 0.8)
-        page.fill(profile.reg_pass_sel, password)
+        fill_field(profile.reg_pass_sel, password, "password")
         human_delay(0.3, 0.8)
-        page.fill(profile.reg_pass_confirm_sel, password)
+        fill_field(profile.reg_pass_confirm_sel, password, "password_confirm")
         human_delay(0.3, 0.8)
-        page.fill(profile.reg_email_sel, email)
+        fill_field(profile.reg_email_sel, email, "email")
         human_delay(0.3, 0.8)
 
         # CAPTCHA
         solve_captcha_on_page(page, profile, captcha_solver, worker_id, status_callback)
 
+        # Check the 18+ / agreement checkbox if present
+        try:
+            checkboxes = page.query_selector_all("input[type='checkbox']")
+            for cb in checkboxes:
+                if not cb.is_checked():
+                    cb.check()
+                    log.info("Checked agreement checkbox")
+        except Exception:
+            pass
+
         # Submit
-        page.click(profile.reg_submit_sel)
+        try:
+            page.click(profile.reg_submit_sel, timeout=5000)
+        except Exception:
+            # Fallback: click by text
+            try:
+                page.click("text=Отправить", timeout=5000)
+            except Exception:
+                page.click("input[type='submit']", timeout=5000)
         page.wait_for_load_state("domcontentloaded")
         human_delay(2, 4)
 
