@@ -28,12 +28,12 @@ PROFILES = {
         # Registration
         register_url="/forum/profile.php?mode=register",
         reg_agree_sel="input[name='agree'], #rules-btn, a.agree",
-        reg_user_sel="input[name='username'], #username",
-        reg_pass_sel="input[name='new_password'], #new_password",
-        reg_pass_confirm_sel="input[name='password_confirm'], #password_confirm",
-        reg_email_sel="input[name='email'], #email",
-        reg_captcha_img_sel="img[src*='captcha'], .captcha-img, #cap_img",
-        reg_captcha_input_sel="input[name='cap_code'], input[name='captcha']",
+        reg_user_sel="input[name='username']",
+        reg_pass_sel="input[name='new_pass'], input[name='new_password']",
+        reg_pass_confirm_sel="input[name='cfm_pass'], input[name='password_confirm']",
+        reg_email_sel="input[name='user_email'], input[name='email']",
+        reg_captcha_img_sel="img[src*='captcha']",
+        reg_captcha_input_sel="input[name^='cap_code']",
         reg_submit_sel="input[type='submit'][name='submit'], button[type='submit']",
 
         # Category / topic listing
@@ -65,11 +65,11 @@ PROFILES = {
         register_url="/forum/profile.php?mode=register",
         reg_agree_sel="input[name='agree'], input[name='agreed'], input[value*='согласен']",
         reg_user_sel="input[name='username']",
-        reg_pass_sel="input[name='new_password'], input[name='cur_password']",
-        reg_pass_confirm_sel="input[name='password_confirm']",
-        reg_email_sel="input[name='email']",
-        reg_captcha_img_sel="img[src*='captcha'], img.captcha-img, #cap_img, img[id*='cap']",
-        reg_captcha_input_sel="input[name='cap_code'], input[name='captcha_code'], input[name='captcha']",
+        reg_pass_sel="input[name='new_pass']",
+        reg_pass_confirm_sel="input[name='cfm_pass']",
+        reg_email_sel="input[name='user_email']",
+        reg_captcha_img_sel="img[src*='captcha']",
+        reg_captcha_input_sel="input[name^='cap_code']",
         reg_submit_sel="input[type='submit'][name='submit'], input[type='submit'], button[type='submit']",
 
         # Category / topic listing
