@@ -120,10 +120,63 @@ def get_topic_list(page: Page, profile: TrackerProfile, category_id: str, page_n
 def _extract_field(text: str, *patterns: str) -> str:
     """Try multiple regex patterns on text, return first match group 1."""
     for pat in patterns:
-        m = re.search(pat, text, re.IGNORECASE)
+        m = re.search(pat, text, re.IGNORECASE | re.DOTALL)
         if m:
             return m.group(1).strip()
     return ""
+
+
+def _extract_description(body_text: str) -> str:
+    """
+    Extract the description/plot section from the post body.
+
+    Tries labeled sections first ("Описание:", "О фильме:", etc.),
+    then falls back to the longest paragraph-like block of text.
+    """
+    # Strategy 1: labeled section — grab text from label until the next label or double newline
+    labels = [
+        r"(?:Описание|Description|О фильме|Сюжет|Plot|Synopsis|About)\s*[:：]\s*",
+    ]
+    for label_pat in labels:
+        # Find the label, then capture everything until the next "Label:" or end
+        pat = label_pat + r"(.*?)(?=\n\s*(?:[А-ЯA-Z][а-яa-z]*\s*[:：]|\n\n\n)|\Z)"
+        m = re.search(pat, body_text, re.IGNORECASE | re.DOTALL)
+        if m:
+            desc = m.group(1).strip()
+            if len(desc) > 20:
+                return desc[:5000]
+
+    # Strategy 2: find the longest continuous block of text (3+ lines without field-like headers)
+    # Split body into blocks separated by double newlines
+    blocks = re.split(r'\n\s*\n', body_text)
+    best = ""
+    # Pattern for "technical" lines like "Год: 2023", "Размер: 5 GB", etc.
+    tech_pat = re.compile(
+        r'^(?:Год|Year|Страна|Country|Жанр|Genre|Режисс[её]р|Director|'
+        r'В ролях|Starring|Cast|Студия|Studio|Формат|Format|Видео|Video|'
+        r'Аудио|Audio|Продолжительность|Duration|Длительность|'
+        r'Размер|Size|File\s*size|Качество|Quality|Разрешение|Resolution|'
+        r'Перевод|Translation|Субтитры|Subtitles|Релиз|Release)\s*[:：]',
+        re.IGNORECASE,
+    )
+    for block in blocks:
+        block = block.strip()
+        if not block or len(block) < 30:
+            continue
+        lines = block.split("\n")
+        # Skip blocks that are mostly technical fields
+        tech_lines = sum(1 for l in lines if tech_pat.match(l.strip()))
+        if tech_lines > len(lines) * 0.5:
+            continue
+        # Prefer longer prose blocks
+        if len(block) > len(best):
+            best = block
+
+    if len(best) > 30:
+        return best[:5000]
+
+    # Strategy 3: just return the body trimmed
+    return body_text[:3000] if body_text else ""
 
 
 def extract_topic_data(page: Page, profile: TrackerProfile, topic_id: str) -> dict:
@@ -171,13 +224,8 @@ def extract_topic_data(page: Page, profile: TrackerProfile, topic_id: str) -> di
         r"([\d.,]+\s*(?:GB|MB|TB|ГБ|МБ|ТБ))",
     )
 
-    # Description: everything after "Описание:" or first meaningful paragraph
-    description = _extract_field(
-        body_text,
-        r"(?:Описание|Description)\s*[:：]\s*(.+?)(?:\n\n|\Z)",
-    )
-    if not description:
-        description = body_text[:5000]
+    # Description: extract the plot/synopsis section
+    description = _extract_description(body_text)
 
     # --- Download URL (constructed, not actually downloading) ---
     dl_path = profile.download_url_tpl.format(topic_id=topic_id)
