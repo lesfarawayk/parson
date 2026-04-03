@@ -316,6 +316,51 @@ class Repository:
             s.refresh(t)
             return t
 
+    def get_all_torrents(self, status_filter: str = "", limit: int = 500) -> list[dict]:
+        """Get torrents for GUI display. Optional status filter."""
+        with _lock:
+            s = self._session()
+            q = s.query(Torrent).order_by(Torrent.id.desc())
+            if status_filter:
+                try:
+                    st = TorrentStatus(status_filter)
+                    q = q.filter(Torrent.status == st)
+                except ValueError:
+                    pass
+            rows = q.limit(limit).all()
+            result = []
+            for t in rows:
+                result.append({
+                    "id": t.id,
+                    "topic_id": t.topic_id,
+                    "studio": t.studio or "",
+                    "film_name": t.film_name or "",
+                    "year": t.year or "",
+                    "formats": t.formats or "[]",
+                    "tags": t.tags or "[]",
+                    "devices": t.devices or "[]",
+                    "duration": t.duration or "",
+                    "file_size": t.file_size or "",
+                    "seeds": t.seeds or 0,
+                    "peers": t.peers or 0,
+                    "status": t.status.value if t.status else "",
+                    "download_url": t.download_url or "",
+                    "cover_path": t.cover_path or "",
+                })
+            return result
+
+    def update_torrent_status(self, topic_id: str, new_status: str):
+        """Update torrent status (for moderation: approve/reject)."""
+        with _lock:
+            s = self._session()
+            t = s.query(Torrent).filter(Torrent.topic_id == topic_id).first()
+            if t:
+                try:
+                    t.status = TorrentStatus(new_status)
+                    s.commit()
+                except ValueError:
+                    pass
+
     def mark_torrent_error(self, topic_id: str):
         with _lock:
             s = self._session()

@@ -72,6 +72,7 @@ class MainWindow(QMainWindow):
         # Tabs
         tabs = QTabWidget()
         tabs.addTab(self._build_dashboard_tab(), "Dashboard")
+        tabs.addTab(self._build_database_tab(), "Database")
         tabs.addTab(self._build_emails_tab(), "Emails")
         tabs.addTab(self._build_blocked_domains_tab(), "Blocked Domains")
         tabs.addTab(self._build_config_tab(), "Settings")
@@ -106,6 +107,135 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(splitter)
         return w
+
+    # ── Database tab ───────────────────────────────────────────
+
+    def _build_database_tab(self) -> QWidget:
+        w = QWidget()
+        layout = QVBoxLayout(w)
+
+        # Top controls
+        ctrl = QHBoxLayout()
+        btn_refresh = QPushButton("Refresh")
+        btn_refresh.clicked.connect(self._refresh_db_table)
+
+        self.db_filter = QComboBox()
+        self.db_filter.addItem("All", "")
+        self.db_filter.addItem("Parsed", "parsed")
+        self.db_filter.addItem("Approved", "approved")
+        self.db_filter.addItem("Rejected", "rejected")
+        self.db_filter.addItem("Skipped", "skipped")
+        self.db_filter.addItem("Error", "error")
+        self.db_filter.currentIndexChanged.connect(self._refresh_db_table)
+
+        self.db_count_label = QLabel("")
+
+        ctrl.addWidget(QLabel("Filter:"))
+        ctrl.addWidget(self.db_filter)
+        ctrl.addWidget(btn_refresh)
+        ctrl.addWidget(self.db_count_label)
+        ctrl.addStretch()
+        layout.addLayout(ctrl)
+
+        # Main table
+        columns = [
+            "ID", "Studio", "Film Name", "Year", "Formats",
+            "Tags", "Duration", "Size", "Seeds", "Peers", "Status",
+        ]
+        self.db_table = QTableWidget(0, len(columns))
+        self.db_table.setHorizontalHeaderLabels(columns)
+        self.db_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)  # Film Name
+        self.db_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)  # Tags
+        self.db_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.db_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.db_table.setAlternatingRowColors(True)
+        self.db_table.setSortingEnabled(True)
+        layout.addWidget(self.db_table)
+
+        # Detail panel at the bottom
+        detail_group = QGroupBox("Details (select a row)")
+        dl = QVBoxLayout(detail_group)
+        self.db_detail = QPlainTextEdit()
+        self.db_detail.setReadOnly(True)
+        self.db_detail.setMaximumHeight(120)
+        dl.addWidget(self.db_detail)
+        layout.addWidget(detail_group)
+
+        self.db_table.currentCellChanged.connect(self._on_db_row_selected)
+
+        self._refresh_db_table()
+        return w
+
+    def _refresh_db_table(self):
+        status_filter = self.db_filter.currentData() if self.db_filter.currentData() else ""
+        rows = self.coordinator.repo.get_all_torrents(status_filter=status_filter)
+        self.db_count_label.setText(f"  ({len(rows)} records)")
+
+        self.db_table.setSortingEnabled(False)
+        self.db_table.setRowCount(len(rows))
+
+        status_colors = {
+            "parsed": QColor(200, 230, 255),
+            "approved": QColor(200, 255, 200),
+            "rejected": QColor(255, 220, 220),
+            "skipped": QColor(240, 240, 240),
+            "error": QColor(255, 180, 180),
+            "downloading": QColor(255, 255, 200),
+            "downloaded": QColor(180, 255, 180),
+        }
+
+        self._db_rows_data = rows  # save for detail view
+
+        for row_idx, r in enumerate(rows):
+            try:
+                formats_str = ", ".join(json.loads(r["formats"])) if r["formats"] != "[]" else ""
+            except Exception:
+                formats_str = r["formats"]
+            try:
+                tags_str = ", ".join(json.loads(r["tags"])) if r["tags"] != "[]" else ""
+            except Exception:
+                tags_str = r["tags"]
+
+            cells = [
+                str(r["topic_id"]),
+                r["studio"],
+                r["film_name"],
+                r["year"],
+                formats_str,
+                tags_str,
+                r["duration"],
+                r["file_size"],
+                str(r["seeds"]),
+                str(r["peers"]),
+                r["status"],
+            ]
+
+            color = status_colors.get(r["status"])
+            for col_idx, text in enumerate(cells):
+                item = QTableWidgetItem(text)
+                if color:
+                    item.setBackground(color)
+                self.db_table.setItem(row_idx, col_idx, item)
+
+        self.db_table.setSortingEnabled(True)
+
+    def _on_db_row_selected(self, row, col, prev_row, prev_col):
+        if not hasattr(self, "_db_rows_data") or row < 0 or row >= len(self._db_rows_data):
+            return
+        r = self._db_rows_data[row]
+        try:
+            devices = ", ".join(json.loads(r["devices"])) if r["devices"] != "[]" else ""
+        except Exception:
+            devices = r["devices"]
+        lines = [
+            f"Topic ID: {r['topic_id']}    Studio: {r['studio']}    Year: {r['year']}",
+            f"Film: {r['film_name']}",
+            f"Devices: {devices}    Size: {r['file_size']}    Duration: {r['duration']}",
+            f"Seeds: {r['seeds']}  Peers: {r['peers']}",
+            f"Download URL: {r['download_url']}",
+            f"Cover: {r['cover_path'] or r.get('cover_url', '')}",
+        ]
+        self.db_detail.setPlainText("\n".join(lines))
 
     # ── Emails tab ──────────────────────────────────────────────
 
@@ -549,9 +679,10 @@ class MainWindow(QMainWindow):
                 f"Pages done: {stats['pages_completed']}"
             )
             self.lbl_stats.setText(text)
-            # Auto-refresh email and blocked domains tables every cycle
+            # Auto-refresh tables every cycle
             self._refresh_email_table()
             self._refresh_blocked_table()
+            self._refresh_db_table()
         except Exception:
             pass
 
