@@ -412,8 +412,18 @@ class MainWindow(QMainWindow):
     # ── Config tab ──────────────────────────────────────────────
 
     def _build_config_tab(self) -> QWidget:
+        outer = QWidget()
+        outer_layout = QVBoxLayout(outer)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        outer_layout.addWidget(scroll)
+
         w = QWidget()
         layout = QVBoxLayout(w)
+        scroll.setWidget(w)
 
         # Tracker settings
         tracker_group = QGroupBox("Tracker")
@@ -501,7 +511,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(proxy_group)
 
         layout.addStretch()
-        return w
+        return outer
 
     # ── Log tab ─────────────────────────────────────────────────
 
