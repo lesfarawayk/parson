@@ -17,7 +17,7 @@ _lock = threading.Lock()
 class Repository:
     def __init__(self):
         self.engine = init_db()
-        self._SessionFactory = sessionmaker(bind=self.engine)
+        self._SessionFactory = sessionmaker(bind=self.engine, expire_on_commit=False)
 
     @contextmanager
     def _session(self):
