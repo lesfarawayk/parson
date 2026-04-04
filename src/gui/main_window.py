@@ -19,6 +19,17 @@ from ..browser.tracker_profiles import list_profiles, PROFILES
 log = logging.getLogger(__name__)
 
 
+def _fmt_duration(seconds: float) -> str:
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    m, sec = divmod(s, 60)
+    if m < 60:
+        return f"{m}m {sec}s"
+    h, mins = divmod(m, 60)
+    return f"{h}h {mins}m"
+
+
 class StatusSignal(QObject):
     """Bridge between worker threads and Qt GUI thread."""
     updated = Signal(str, str, str)  # worker_id, state, message
@@ -746,13 +757,19 @@ class MainWindow(QMainWindow):
             pages_wip = stats.get('pages_in_progress', 0)
             pages_total = stats.get('pages_total', 0)
 
+            elapsed = stats.get('elapsed', 0)
+            avg_page = stats.get('avg_page_time', 0)
+            elapsed_str = _fmt_duration(elapsed) if elapsed > 0 else "—"
+            avg_str = f"{avg_page:.0f}s" if avg_page > 0 else "—"
+
             text = (
                 f"DB: {stats['total_torrents']} torrents  |  "
-                f"Scanned: {stats.get('worker_saved', 0)} saved, "
-                f"{stats.get('worker_filtered', 0)} filtered, "
-                f"{stats.get('worker_duplicate', 0)} dupes, "
-                f"{stats.get('worker_error', 0)} errors  |  "
-                f"Emails: {stats['fresh_emails']} fresh"
+                f"Saved: {stats.get('worker_saved', 0)}, "
+                f"Filtered: {stats.get('worker_filtered', 0)}, "
+                f"Dupes: {stats.get('worker_duplicate', 0)}, "
+                f"Errors: {stats.get('worker_error', 0)}  |  "
+                f"Emails: {stats['fresh_emails']}  |  "
+                f"Time: {elapsed_str} (avg {avg_str}/page)"
             )
             self.lbl_stats.setText(text)
 

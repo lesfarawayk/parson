@@ -16,6 +16,7 @@ import json
 import logging
 import random
 import string
+import time
 from pathlib import Path
 from playwright.sync_api import BrowserContext
 
@@ -33,6 +34,18 @@ from ..api.notletters import NotLettersClient
 from ..config_manager import load_config, get_download_dir
 
 log = logging.getLogger(__name__)
+
+
+def _fmt_duration(seconds: float) -> str:
+    """Format seconds into human-readable string like '2m 35s' or '1h 12m'."""
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    m, sec = divmod(s, 60)
+    if m < 60:
+        return f"{m}m {sec}s"
+    h, mins = divmod(m, 60)
+    return f"{h}h {mins}m"
 
 
 def _random_username(length=10) -> str:
@@ -60,6 +73,8 @@ class ParserWorker(BaseWorker):
 
         # Cumulative stats across all pages
         self.total_stats = {"saved": 0, "filtered": 0, "duplicate": 0, "error": 0}
+        self.started_at: float | None = None  # time.monotonic() when work() begins
+        self.pages_times: list[float] = []     # seconds per page
 
     # ── Account lifecycle ──────────────────────────────────────
 
@@ -166,6 +181,7 @@ class ParserWorker(BaseWorker):
     # ── Main work loop ─────────────────────────────────────────
 
     def work(self):
+        self.started_at = time.monotonic()
         cfg = load_config()
         tracker_name = cfg["tracker"].get("profile", "rutracker")
         profile = get_profile(tracker_name)
@@ -216,15 +232,18 @@ class ParserWorker(BaseWorker):
                 if self._current_page_num is not None:
                     self.repo.complete_page(category_id, self._current_page_num, self.worker_id)
                     ps = getattr(self, "_page_stats", {})
+                    page_elapsed = time.monotonic() - getattr(self, "_page_start_time", time.monotonic())
+                    self.pages_times.append(page_elapsed)
                     # Accumulate into total
                     for k in ("saved", "filtered", "duplicate", "error"):
                         self.total_stats[k] = self.total_stats.get(k, 0) + ps.get(k, 0)
                     ts = self.total_stats
+                    total_elapsed = time.monotonic() - (self.started_at or time.monotonic())
                     self._emit_status(
-                        f"Page {self._current_page_num}/{pages_end} done — "
-                        f"page: +{ps.get('saved', 0)} saved, +{ps.get('filtered', 0)} filtered | "
-                        f"total: {ts['saved']} saved, {ts['filtered']} filtered, "
-                        f"{ts['duplicate']} dupes, {ts['error']} err"
+                        f"Page {self._current_page_num}/{pages_end} [{_fmt_duration(page_elapsed)}] — "
+                        f"+{ps.get('saved', 0)} saved, +{ps.get('filtered', 0)} filtered | "
+                        f"total: {ts['saved']} saved, {ts['filtered']} flt, "
+                        f"{ts['duplicate']} dup | {_fmt_duration(total_elapsed)}"
                     )
 
                 self._current_page_num = self.repo.claim_next_page(category_id, self.worker_id)
@@ -232,6 +251,7 @@ class ParserWorker(BaseWorker):
                     self._emit_status("All pages processed!")
                     break
 
+                self._page_start_time = time.monotonic()
                 self._emit_status(f"Scanning page {self._current_page_num}/{pages_end}...")
                 try:
                     topics = get_topic_list(self.page, profile, category_id, self._current_page_num)

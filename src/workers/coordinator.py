@@ -85,17 +85,27 @@ class WorkerCoordinator:
             w.request_resume()
 
     def get_stats(self) -> dict:
+        import time
         stats = self.repo.get_stats()
         # Aggregate worker-level counters
         agg = {"saved": 0, "filtered": 0, "duplicate": 0, "error": 0}
+        all_page_times: list[float] = []
+        earliest_start: float | None = None
         for w in self.workers:
             if hasattr(w, "total_stats"):
                 for k in agg:
                     agg[k] += w.total_stats.get(k, 0)
+            if hasattr(w, "pages_times"):
+                all_page_times.extend(w.pages_times)
+            if hasattr(w, "started_at") and w.started_at is not None:
+                if earliest_start is None or w.started_at < earliest_start:
+                    earliest_start = w.started_at
         stats["worker_saved"] = agg["saved"]
         stats["worker_filtered"] = agg["filtered"]
         stats["worker_duplicate"] = agg["duplicate"]
         stats["worker_error"] = agg["error"]
+        stats["elapsed"] = time.monotonic() - earliest_start if earliest_start else 0
+        stats["avg_page_time"] = sum(all_page_times) / len(all_page_times) if all_page_times else 0
         return stats
 
     def get_worker_statuses(self) -> list[dict]:
