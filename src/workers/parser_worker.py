@@ -81,6 +81,7 @@ class ParserWorker(BaseWorker):
     def _new_account_cycle(self, cfg: dict, profile: TrackerProfile) -> bool:
         """Take credentials → optionally register → log in."""
         skip_reg = cfg["tracker"].get("skip_registration", False)
+        share_email = cfg["tracker"].get("share_email", False)
 
         if self.ctx:
             try:
@@ -90,13 +91,16 @@ class ParserWorker(BaseWorker):
             self.ctx = None
             self.page = None
 
-        email = self.repo.get_fresh_email()
+        if share_email:
+            email = self.repo.get_first_email()
+        else:
+            email = self.repo.get_fresh_email()
         if not email:
-            self._emit_status("No fresh emails — add more in the Emails tab!")
+            self._emit_status("No emails — add in Emails tab!")
             return False
 
         self._current_email_id = email.id
-        self._emit_status(f"Using: {email.email}")
+        self._emit_status(f"Using: {email.email}" + (" (shared)" if share_email else ""))
         self.ctx = self.browser.create_context(proxy=self.proxy)
 
         if skip_reg:
@@ -125,7 +129,8 @@ class ParserWorker(BaseWorker):
                 log.warning(f"Domain '{e.domain}' blacklisted")
                 self._emit_status(f"Domain '{e.domain}' blacklisted — banned")
                 self.repo.add_blocked_domain(e.domain, reason=f"Blacklisted by {profile.name}")
-                self.repo.mark_email_used(email.id)
+                if not share_email:
+                    self.repo.mark_email_used(email.id)
                 try:
                     self.ctx.close()
                 except Exception:
@@ -137,7 +142,8 @@ class ParserWorker(BaseWorker):
 
             if not success:
                 self._emit_status(f"Registration failed for {email.email}")
-                self.repo.mark_email_used(email.id)
+                if not share_email:
+                    self.repo.mark_email_used(email.id)
                 try:
                     self.ctx.close()
                 except Exception:
@@ -151,7 +157,8 @@ class ParserWorker(BaseWorker):
         except Exception as e:
             self.log.error(f"Login failed: {e}")
             self._emit_status(f"Login failed: {e}")
-            self.repo.mark_email_used(email.id)
+            if not share_email:
+                self.repo.mark_email_used(email.id)
             try:
                 self.ctx.close()
             except Exception:
@@ -164,7 +171,8 @@ class ParserWorker(BaseWorker):
         except Exception:
             pass
 
-        self.repo.mark_email_used(email.id)
+        if not share_email:
+            self.repo.mark_email_used(email.id)
         self._emit_status(f"Ready: {username}")
         return True
 

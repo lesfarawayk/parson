@@ -517,6 +517,11 @@ class MainWindow(QMainWindow):
             "When enabled, the email list is treated as tracker logins (login:password).\n"
             "No registration will be performed — workers log in directly."
         )
+        self.cfg_share_email = QCheckBox("Share 1 email across all workers (don't expire after use)")
+        self.cfg_share_email.setToolTip(
+            "All workers use the first email in the list.\n"
+            "The email is never marked as exhausted — stays fresh forever."
+        )
         tl.addRow("Tracker:", self.cfg_tracker_profile)
         tl.addRow("", self.cfg_tracker_url_label)
         tl.addRow("Category ID:", self.cfg_category_id)
@@ -524,6 +529,7 @@ class MainWindow(QMainWindow):
         tl.addRow("Pages end:", self.cfg_pages_end)
         tl.addRow("Max downloads/account:", self.cfg_max_dl)
         tl.addRow("", self.cfg_skip_reg)
+        tl.addRow("", self.cfg_share_email)
         layout.addWidget(tracker_group)
 
         # Workers settings
@@ -627,6 +633,7 @@ class MainWindow(QMainWindow):
         self.cfg_pages_end.setValue(cfg["tracker"]["pages_end"])
         self.cfg_max_dl.setValue(cfg["tracker"]["max_downloads_per_account"])
         self.cfg_skip_reg.setChecked(cfg["tracker"].get("skip_registration", False))
+        self.cfg_share_email.setChecked(cfg["tracker"].get("share_email", False))
 
         self.cfg_parser_count.setValue(cfg["workers"]["parser_count"])
         # email_reg_count removed — parser workers handle registration themselves
@@ -657,6 +664,7 @@ class MainWindow(QMainWindow):
                 "pages_end": self.cfg_pages_end.value(),
                 "max_downloads_per_account": self.cfg_max_dl.value(),
                 "skip_registration": self.cfg_skip_reg.isChecked(),
+                "share_email": self.cfg_share_email.isChecked(),
             },
             "workers": {
                 "parser_count": self.cfg_parser_count.value(),

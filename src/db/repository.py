@@ -55,6 +55,14 @@ class Repository:
                 return acc
             return None
 
+    def get_first_email(self) -> EmailAccount | None:
+        """Get the first email without changing its status. For shared mode."""
+        with _lock, self._session() as s:
+            acc = s.query(EmailAccount).order_by(EmailAccount.id).first()
+            if acc:
+                s.expunge(acc)
+            return acc
+
     def mark_email_used(self, email_id: int):
         with _lock, self._session() as s:
             acc = s.query(EmailAccount).get(email_id)
