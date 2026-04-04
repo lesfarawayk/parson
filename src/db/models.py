@@ -141,9 +141,13 @@ def init_db():
     return engine
 
 
-def get_session(engine=None):
-    """Create a new DB session."""
+def get_session_factory(engine=None):
+    """Create a session factory bound to the engine."""
     if engine is None:
         engine = init_db()
-    Session = sessionmaker(bind=engine)
-    return Session()
+    return sessionmaker(bind=engine)
+
+
+def get_session(engine=None):
+    """Create a new DB session. Caller must close it."""
+    return get_session_factory(engine)()
