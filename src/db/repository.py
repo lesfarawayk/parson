@@ -192,6 +192,19 @@ class Repository:
 
     # ── Page Progress ───────────────────────────────────────────
 
+    def release_stale_claims(self):
+        """Release all in-progress (uncompleted) page claims from previous runs."""
+        with _lock, self._session() as s:
+            stale = s.query(PageProgress).filter(
+                and_(PageProgress.is_completed == False, PageProgress.worker_id != None)
+            ).all()
+            count = len(stale)
+            for p in stale:
+                s.delete(p)
+            if count:
+                s.commit()
+            return count
+
     def claim_next_page(self, category_id: str, worker_id: str) -> int | None:
         with _lock, self._session() as s:
             existing = s.query(PageProgress).filter(

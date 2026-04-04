@@ -239,7 +239,7 @@ class DBViewer(QMainWindow):
     def _fill_table(self, rows: list[dict]):
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(rows))
-        self._visible_rows = rows
+        self._rows_by_id = {str(r.get("topic_id", r.get("id", ""))): r for r in rows}
 
         for row_idx, r in enumerate(rows):
             for col_idx, (key, _, _) in enumerate(COLUMNS):
@@ -269,10 +269,18 @@ class DBViewer(QMainWindow):
         self.table.setSortingEnabled(True)
 
     def _on_row_selected(self, row, col, prev_row, prev_col):
-        if not hasattr(self, "_visible_rows") or row < 0 or row >= len(self._visible_rows):
+        if row < 0:
             self.detail_text.clear()
             return
-        r = self._visible_rows[row]
+        # Get topic_id from the actual table cell (column 1 = topic_id) to handle sorting
+        topic_item = self.table.item(row, 1)
+        if not topic_item or not hasattr(self, "_rows_by_id"):
+            self.detail_text.clear()
+            return
+        r = self._rows_by_id.get(topic_item.text())
+        if not r:
+            self.detail_text.clear()
+            return
 
         # Cover image — try BLOB from DB first, fallback to file path
         cover_loaded = False

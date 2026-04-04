@@ -49,6 +49,11 @@ class WorkerCoordinator:
         self._running = True
         cfg = load_config()
 
+        # Release pages that were in-progress during previous run
+        stale = self.repo.release_stale_claims()
+        if stale:
+            log.info(f"Released {stale} stale page claims from previous run")
+
         stats = self.repo.get_stats()
         if stats["fresh_emails"] == 0:
             log.warning("No fresh emails in DB — add emails before starting!")

@@ -224,7 +224,7 @@ class MainWindow(QMainWindow):
             "downloaded": QColor(180, 255, 180),
         }
 
-        self._db_rows_data = rows  # save for detail view
+        self._db_rows_by_id = {str(r["topic_id"]): r for r in rows}
 
         def _jp(raw):
             """JSON list → comma string."""
@@ -262,9 +262,15 @@ class MainWindow(QMainWindow):
         self.db_table.setSortingEnabled(True)
 
     def _on_db_row_selected(self, row, col, prev_row, prev_col):
-        if not hasattr(self, "_db_rows_data") or row < 0 or row >= len(self._db_rows_data):
+        if row < 0:
             return
-        r = self._db_rows_data[row]
+        # Get topic_id from table cell (column 0) to handle sorting correctly
+        topic_item = self.db_table.item(row, 0)
+        if not topic_item or not hasattr(self, "_db_rows_by_id"):
+            return
+        r = self._db_rows_by_id.get(topic_item.text())
+        if not r:
+            return
         try:
             devices = ", ".join(json.loads(r["devices"])) if r["devices"] != "[]" else ""
         except Exception:

@@ -282,6 +282,17 @@ class ParserWorker(BaseWorker):
         if self._current_page_num is not None and self._topic_queue:
             self.repo.release_page(category_id, self.worker_id)
 
+        # Final summary
+        total_elapsed = time.monotonic() - (self.started_at or time.monotonic())
+        ts = self.total_stats
+        pages_done = len(self.pages_times)
+        self.log.info(
+            f"=== FINISHED === pages: {pages_done}, "
+            f"saved: {ts['saved']}, filtered: {ts['filtered']}, "
+            f"dupes: {ts['duplicate']}, errors: {ts['error']}, "
+            f"time: {_fmt_duration(total_elapsed)}"
+        )
+
     # ── Topic processing ───────────────────────────────────────
 
     def _process_topic(self, profile, topic, category_id, format_filters, download_dir):

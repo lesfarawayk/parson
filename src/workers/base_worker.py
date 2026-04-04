@@ -32,6 +32,7 @@ class BaseWorker(threading.Thread):
 
     def _emit_status(self, message: str):
         self.status_message = message
+        self.log.info(message)
         for cb in self._callbacks:
             try:
                 cb(self.worker_id, self.state.value, message)
