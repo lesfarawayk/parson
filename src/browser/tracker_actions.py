@@ -271,23 +271,27 @@ def extract_topic_data(page: Page, profile: TrackerProfile, topic_id: str) -> di
     }
 
 
-def download_cover_image(page: Page, cover_url: str, download_dir: Path, topic_id: str) -> str | None:
-    """Download cover image. Returns saved path or None."""
+def download_cover_image(page: Page, cover_url: str, download_dir: Path, topic_id: str) -> dict:
+    """Download cover image. Returns dict with 'path' and 'data' (raw bytes)."""
+    result = {"path": None, "data": None}
     if not cover_url:
-        return None
+        return result
     try:
         response = page.request.get(cover_url)
         if response.ok:
+            image_bytes = response.body()
+            result["data"] = image_bytes
+
             ext = ".jpg"
             if ".png" in cover_url.lower():
                 ext = ".png"
             dest = download_dir / "covers" / f"{topic_id}{ext}"
             dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(response.body())
-            return str(dest)
+            dest.write_bytes(image_bytes)
+            result["path"] = str(dest)
     except Exception as e:
         log.warning(f"Failed to download cover for {topic_id}: {e}")
-    return None
+    return result
 
 
 def solve_captcha_on_page(page: Page, profile: TrackerProfile,

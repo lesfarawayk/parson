@@ -268,9 +268,9 @@ class ParserWorker(BaseWorker):
             return
 
         # 4. Download cover image
-        cover_path = None
+        cover = {"path": None, "data": None}
         if details["cover_url"]:
-            cover_path = download_cover_image(self.page, details["cover_url"], download_dir, topic_id)
+            cover = download_cover_image(self.page, details["cover_url"], download_dir, topic_id)
 
         # 5. Save everything to DB
         data = {
@@ -289,7 +289,8 @@ class ParserWorker(BaseWorker):
             "duration": details["duration"],
             "file_size": details["file_size"],
             "cover_url": details["cover_url"],
-            "cover_path": cover_path,
+            "cover_path": cover["path"],
+            "cover_data": cover["data"],
             "download_url": details["download_url"],
             "seeds": details["seeds"],
             "peers": details["peers"],

@@ -277,6 +277,7 @@ class Repository:
                 file_size=data.get("file_size", ""),
                 cover_url=data.get("cover_url"),
                 cover_path=data.get("cover_path"),
+                cover_data=data.get("cover_data"),
                 download_url=data.get("download_url"),
                 seeds=data.get("seeds", 0),
                 peers=data.get("peers", 0),
@@ -317,6 +318,12 @@ class Repository:
                 }
                 for t in rows
             ]
+
+    def get_cover_data(self, topic_id: str) -> bytes | None:
+        """Get cover image bytes for a single torrent."""
+        with _lock, self._session() as s:
+            t = s.query(Torrent).filter(Torrent.topic_id == topic_id).first()
+            return t.cover_data if t else None
 
     def update_torrent_status(self, topic_id: str, new_status: str):
         with _lock, self._session() as s:

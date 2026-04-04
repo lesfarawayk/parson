@@ -274,17 +274,29 @@ class DBViewer(QMainWindow):
             return
         r = self._visible_rows[row]
 
-        # Cover image
-        cover_path = r.get("cover_path", "")
-        if cover_path and Path(cover_path).exists():
-            pix = QPixmap(str(cover_path))
+        # Cover image — try BLOB from DB first, fallback to file path
+        cover_loaded = False
+        cover_data = r.get("cover_data")
+        if cover_data and isinstance(cover_data, (bytes, bytearray)):
+            pix = QPixmap()
+            pix.loadFromData(cover_data)
             if not pix.isNull():
                 self.cover_label.setPixmap(
                     pix.scaled(180, 240, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 )
-            else:
-                self.cover_label.setText("Bad image")
-        else:
+                cover_loaded = True
+
+        if not cover_loaded:
+            cover_path = r.get("cover_path", "")
+            if cover_path and Path(cover_path).exists():
+                pix = QPixmap(str(cover_path))
+                if not pix.isNull():
+                    self.cover_label.setPixmap(
+                        pix.scaled(180, 240, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    )
+                    cover_loaded = True
+
+        if not cover_loaded:
             self.cover_label.clear()
             self.cover_label.setText("No cover")
 

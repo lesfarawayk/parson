@@ -3,7 +3,7 @@
 from datetime import datetime
 from sqlalchemy import (
     create_engine, Column, Integer, String, Text, Boolean,
-    DateTime, Enum as SAEnum, ForeignKey
+    DateTime, Enum as SAEnum, ForeignKey, LargeBinary
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 from pathlib import Path
@@ -109,6 +109,7 @@ class Torrent(Base):
     # Media
     cover_url = Column(String(1000), nullable=True)
     cover_path = Column(String(1000), nullable=True)
+    cover_data = Column(LargeBinary, nullable=True)  # original image bytes (JPEG/PNG)
 
     # Torrent info (saved, not actually downloaded by parser workers)
     download_url = Column(String(1000), nullable=True)
@@ -131,7 +132,7 @@ def init_db():
             cols = [row[1] for row in conn.execute(
                 __import__("sqlalchemy").text("PRAGMA table_info(torrents)")
             )]
-            if cols and ("title_raw" not in cols or "actors" not in cols):
+            if cols and ("title_raw" not in cols or "actors" not in cols or "cover_data" not in cols):
                 conn.execute(__import__("sqlalchemy").text("DROP TABLE torrents"))
                 conn.commit()
         except Exception:

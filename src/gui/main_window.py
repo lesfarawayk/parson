@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
 )
 from PySide6.QtCore import Qt, QTimer, Signal, QObject
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QPixmap
 
 from ..workers.coordinator import WorkerCoordinator
 from ..config_manager import load_config, save_config
@@ -173,11 +173,21 @@ class MainWindow(QMainWindow):
 
         # Detail panel at the bottom
         detail_group = QGroupBox("Details (select a row)")
-        dl = QVBoxLayout(detail_group)
+        dl = QHBoxLayout(detail_group)
+
+        # Cover image preview
+        self.db_cover_label = QLabel()
+        self.db_cover_label.setFixedSize(160, 220)
+        self.db_cover_label.setStyleSheet("border: 1px solid #ccc; background: #f0f0f0;")
+        self.db_cover_label.setAlignment(Qt.AlignCenter)
+        self.db_cover_label.setText("No cover")
+        dl.addWidget(self.db_cover_label)
+
+        # Text details
         self.db_detail = QPlainTextEdit()
         self.db_detail.setReadOnly(True)
-        self.db_detail.setMaximumHeight(120)
-        dl.addWidget(self.db_detail)
+        self.db_detail.setMaximumHeight(220)
+        dl.addWidget(self.db_detail, 1)
         layout.addWidget(detail_group)
 
         self.db_table.currentCellChanged.connect(self._on_db_row_selected)
@@ -259,9 +269,24 @@ class MainWindow(QMainWindow):
             f"Devices: {devices}    Size: {r['file_size']}    Duration: {r['duration']}",
             f"Seeds: {r['seeds']}  Peers: {r['peers']}",
             f"Download URL: {r['download_url']}",
-            f"Cover: {r['cover_path'] or r.get('cover_url', '')}",
         ]
         self.db_detail.setPlainText("\n".join(lines))
+
+        # Load cover from DB
+        self.db_cover_label.clear()
+        self.db_cover_label.setText("No cover")
+        try:
+            cover_bytes = self.coordinator.repo.get_cover_data(r["topic_id"])
+            if cover_bytes:
+                pixmap = QPixmap()
+                pixmap.loadFromData(cover_bytes)
+                if not pixmap.isNull():
+                    self.db_cover_label.setPixmap(
+                        pixmap.scaled(160, 220, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    )
+                    self.db_cover_label.setText("")
+        except Exception:
+            pass
 
     def _on_clear_database(self):
         reply = QMessageBox.question(
