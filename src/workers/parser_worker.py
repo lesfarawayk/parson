@@ -212,7 +212,14 @@ class ParserWorker(BaseWorker):
             if not self._topic_queue:
                 if self._current_page_num is not None:
                     self.repo.complete_page(category_id, self._current_page_num, self.worker_id)
-                    self._emit_status(f"Page {self._current_page_num}/{pages_end} done")
+                    ps = getattr(self, "_page_stats", {})
+                    self._emit_status(
+                        f"Page {self._current_page_num}/{pages_end} done — "
+                        f"saved: {ps.get('saved', 0)}, "
+                        f"filtered: {ps.get('filtered', 0)}, "
+                        f"dupes: {ps.get('duplicate', 0)}, "
+                        f"errors: {ps.get('error', 0)}"
+                    )
 
                 self._current_page_num = self.repo.claim_next_page(category_id, self.worker_id)
                 if self._current_page_num is None:
@@ -223,6 +230,7 @@ class ParserWorker(BaseWorker):
                 try:
                     topics = get_topic_list(self.page, profile, category_id, self._current_page_num)
                     self._topic_queue = list(topics)
+                    self._page_stats = {"total": len(topics), "filtered": 0, "duplicate": 0, "saved": 0, "error": 0}
                     self._emit_status(f"Page {self._current_page_num}/{pages_end}: {len(topics)} topics found")
                 except Exception as e:
                     self.log.error(f"Failed to scan page {self._current_page_num}: {e}")
@@ -245,9 +253,11 @@ class ParserWorker(BaseWorker):
     def _process_topic(self, profile, topic, category_id, format_filters, download_dir):
         topic_id = topic["topic_id"]
         title = topic["title"]
+        ps = getattr(self, "_page_stats", {})
 
         # Skip if already in DB
         if self.repo.torrent_exists(topic_id):
+            ps["duplicate"] = ps.get("duplicate", 0) + 1
             return
 
         # 1. Parse title: [Studio]Name[Tags/Formats][Devices]
@@ -255,6 +265,7 @@ class ParserWorker(BaseWorker):
 
         # 2. Check if formats match the filter
         if format_filters and not matches_format_filter(parsed["formats"], format_filters):
+            ps["filtered"] = ps.get("filtered", 0) + 1
             log.debug(f"Topic {topic_id}: formats {parsed['formats']} don't match filter, skipping")
             return
 
@@ -265,6 +276,7 @@ class ParserWorker(BaseWorker):
             details = extract_topic_data(self.page, profile, topic_id)
         except Exception as e:
             self.log.error(f"Failed to extract topic {topic_id}: {e}")
+            ps["error"] = ps.get("error", 0) + 1
             return
 
         # 4. Download cover image
@@ -298,6 +310,7 @@ class ParserWorker(BaseWorker):
 
         t = self.repo.save_torrent_data(data)
         if t:
+            ps["saved"] = ps.get("saved", 0) + 1
             self._emit_status(
                 f"Saved: {parsed['film_name'][:30]} | "
                 f"formats={parsed['formats']} seeds={details['seeds']}"
