@@ -87,7 +87,7 @@ class WorkerCoordinator:
     def get_stats(self) -> dict:
         import time
         stats = self.repo.get_stats()
-        # Aggregate worker-level counters
+        # Aggregate worker-level counters (completed pages + current in-progress page)
         agg = {"saved": 0, "filtered": 0, "duplicate": 0, "error": 0}
         all_page_times: list[float] = []
         earliest_start: float | None = None
@@ -95,6 +95,11 @@ class WorkerCoordinator:
             if hasattr(w, "total_stats"):
                 for k in agg:
                     agg[k] += w.total_stats.get(k, 0)
+            # Add current page stats (in-progress, not yet accumulated)
+            cur_ps = getattr(w, "_page_stats", None)
+            if cur_ps:
+                for k in agg:
+                    agg[k] += cur_ps.get(k, 0)
             if hasattr(w, "pages_times"):
                 all_page_times.extend(w.pages_times)
             if hasattr(w, "started_at") and w.started_at is not None:
