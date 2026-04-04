@@ -2,18 +2,56 @@
 Worker coordinator — manages the lifecycle of parser workers.
 
 Each worker creates its own Playwright + browser (thread requirement).
-No shared browser manager needed.
+Watchdog thread monitors workers and restarts crashed ones.
 """
 
 import logging
+import os
+import threading
+import time
 from typing import Callable
 
 from ..db.repository import Repository
 from ..config_manager import load_config
 from .parser_worker import ParserWorker
-from .base_worker import BaseWorker
+from .base_worker import BaseWorker, WorkerState
 
 log = logging.getLogger(__name__)
+
+
+def _memory_mb() -> float:
+    """Current process RSS in MB (works on Windows and Linux)."""
+    try:
+        import psutil
+        return psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
+    except ImportError:
+        pass
+    # Fallback for Windows without psutil
+    try:
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.windll.kernel32
+        class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+            _fields_ = [
+                ("cb", wintypes.DWORD),
+                ("PageFaultCount", wintypes.DWORD),
+                ("PeakWorkingSetSize", ctypes.c_size_t),
+                ("WorkingSetSize", ctypes.c_size_t),
+                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                ("PagefileUsage", ctypes.c_size_t),
+                ("PeakPagefileUsage", ctypes.c_size_t),
+            ]
+        pmc = PROCESS_MEMORY_COUNTERS()
+        pmc.cb = ctypes.sizeof(pmc)
+        handle = kernel32.GetCurrentProcess()
+        if ctypes.windll.psapi.GetProcessMemoryInfo(handle, ctypes.byref(pmc), pmc.cb):
+            return pmc.WorkingSetSize / (1024 * 1024)
+    except Exception:
+        pass
+    return 0.0
 
 
 class WorkerCoordinator:
@@ -22,6 +60,10 @@ class WorkerCoordinator:
         self.workers: list[BaseWorker] = []
         self._status_callback: Callable | None = None
         self._running = False
+        self._watchdog_thread: threading.Thread | None = None
+        self._watchdog_stop = threading.Event()
+        self._max_restarts = 5  # per worker
+        self._restart_counts: dict[str, int] = {}
 
     def set_status_callback(self, cb: Callable):
         self._status_callback = cb
@@ -58,8 +100,11 @@ class WorkerCoordinator:
         if stats["fresh_emails"] == 0:
             log.warning("No fresh emails in DB — add emails before starting!")
 
+        log.info(f"Memory at start: {_memory_mb():.0f} MB")
+
         for i in range(cfg["workers"].get("parser_count", 3)):
             wid = f"parser-{i}"
+            self._restart_counts[wid] = 0
             w = ParserWorker(wid, self.repo, proxy=self._get_proxy(i))
             if self._status_callback:
                 w.add_status_callback(self._status_callback)
@@ -68,18 +113,70 @@ class WorkerCoordinator:
 
         log.info(f"Started {len(self.workers)} parser workers (each with own browser)")
 
+        # Start watchdog
+        self._watchdog_stop.clear()
+        self._watchdog_thread = threading.Thread(target=self._watchdog_loop, daemon=True)
+        self._watchdog_thread.start()
+
+    def _watchdog_loop(self):
+        """Monitor workers, restart crashed ones, log memory."""
+        log.info("Watchdog started")
+        last_memory_log = 0
+        while not self._watchdog_stop.wait(timeout=10):
+            # Log memory every 2 minutes
+            now = time.monotonic()
+            if now - last_memory_log > 120:
+                log.info(f"Memory: {_memory_mb():.0f} MB, workers: {len(self.workers)}")
+                last_memory_log = now
+
+            # Check for dead workers
+            for i, w in enumerate(list(self.workers)):
+                if not w.is_alive() and w.state in (WorkerState.ERROR, WorkerState.STOPPED):
+                    wid = w.worker_id
+                    restarts = self._restart_counts.get(wid, 0)
+
+                    if w.state == WorkerState.ERROR and restarts < self._max_restarts:
+                        self._restart_counts[wid] = restarts + 1
+                        log.warning(
+                            f"Watchdog: {wid} died (state={w.state.value}), "
+                            f"restarting ({restarts + 1}/{self._max_restarts})... "
+                            f"Memory: {_memory_mb():.0f} MB"
+                        )
+                        new_w = ParserWorker(wid, self.repo, proxy=self._get_proxy(i))
+                        if self._status_callback:
+                            new_w.add_status_callback(self._status_callback)
+                        self.workers[i] = new_w
+                        new_w.start()
+                    elif w.state == WorkerState.ERROR and restarts >= self._max_restarts:
+                        log.error(f"Watchdog: {wid} exceeded max restarts ({self._max_restarts}), giving up")
+
+            # Check if ALL workers are done (stopped, not error)
+            all_done = all(
+                not w.is_alive() and w.state == WorkerState.STOPPED
+                for w in self.workers
+            )
+            if all_done:
+                log.info("Watchdog: all workers finished successfully")
+                break
+
+        log.info("Watchdog stopped")
+
     def stop(self):
         """Gracefully stop all workers (each cleans up its own browser)."""
         if not self._running:
             return
         log.info("Stopping all workers...")
+        self._watchdog_stop.set()
         for w in self.workers:
             w.request_stop()
         for w in self.workers:
             w.join(timeout=30)
+        if self._watchdog_thread:
+            self._watchdog_thread.join(timeout=5)
         self.workers.clear()
+        self._restart_counts.clear()
         self._running = False
-        log.info("All workers stopped")
+        log.info(f"All workers stopped. Memory: {_memory_mb():.0f} MB")
 
     def pause_all(self):
         for w in self.workers:
@@ -90,7 +187,6 @@ class WorkerCoordinator:
             w.request_resume()
 
     def get_stats(self) -> dict:
-        import time
         stats = self.repo.get_stats()
         # Aggregate worker-level counters (completed pages + current in-progress page)
         agg = {"saved": 0, "filtered": 0, "duplicate": 0, "error": 0}
@@ -117,6 +213,7 @@ class WorkerCoordinator:
         stats["elapsed"] = time.monotonic() - earliest_start if earliest_start else 0
         avg_page = sum(all_page_times) / len(all_page_times) if all_page_times else 0
         stats["avg_page_time"] = avg_page
+        stats["memory_mb"] = _memory_mb()
 
         # ETA: remaining pages / (active workers processing in parallel)
         active_workers = sum(1 for w in self.workers if getattr(w, "page", None) is not None)

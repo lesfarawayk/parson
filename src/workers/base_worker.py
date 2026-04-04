@@ -72,10 +72,16 @@ class BaseWorker(threading.Thread):
             self.state = WorkerState.ERROR
             self._emit_status(f"Error: {e}")
             self.log.exception(f"Worker {self.worker_id} crashed")
+        except BaseException as e:
+            # Catch MemoryError, SystemExit, KeyboardInterrupt etc.
+            self.state = WorkerState.ERROR
+            self.log.critical(f"Worker {self.worker_id} fatal: {type(e).__name__}: {e}")
+            self._emit_status(f"FATAL: {type(e).__name__}: {e}")
         finally:
             if self.state != WorkerState.ERROR:
                 self.state = WorkerState.STOPPED
                 self._emit_status("Stopped")
+            self.log.info(f"Worker {self.worker_id} thread exiting (state={self.state.value})")
 
     def work(self):
         """Override in subclasses."""

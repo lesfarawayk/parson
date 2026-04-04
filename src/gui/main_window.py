@@ -785,7 +785,8 @@ class MainWindow(QMainWindow):
                 f"Dupes: {stats.get('worker_duplicate', 0)}, "
                 f"Errors: {stats.get('worker_error', 0)}  |  "
                 f"Time: {elapsed_str} (avg {avg_str}/page)  |  "
-                f"ETA: {eta_str}"
+                f"ETA: {eta_str}  |  "
+                f"RAM: {stats.get('memory_mb', 0):.0f} MB"
             )
             self.lbl_stats.setText(text)
 

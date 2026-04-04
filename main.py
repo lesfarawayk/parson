@@ -2,6 +2,7 @@
 
 import sys
 import logging
+import faulthandler
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from PySide6.QtWidgets import QApplication
@@ -9,9 +10,16 @@ from src.gui.main_window import MainWindow
 
 LOG_DIR = Path(__file__).resolve().parent / "data" / "logs"
 
+log = logging.getLogger("parson")
+
 
 def main():
     LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Enable faulthandler — dumps traceback on segfault/abort to stderr AND log file
+    fault_path = LOG_DIR / "crash.log"
+    fault_file = open(fault_path, "a")
+    faulthandler.enable(file=fault_file)
 
     # Console handler
     logging.basicConfig(
@@ -31,6 +39,17 @@ def main():
     ))
     logging.getLogger().addHandler(file_handler)
 
+    # Global exception hook — catch anything that slips through
+    def _global_exception(exc_type, exc_value, exc_tb):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_tb)
+            return
+        log.critical("Unhandled exception", exc_info=(exc_type, exc_value, exc_tb))
+
+    sys.excepthook = _global_exception
+
+    log.info("=== Parson starting ===")
+
     app = QApplication(sys.argv)
     app.setApplicationName("Parson")
     app.setStyle("Fusion")
@@ -38,7 +57,10 @@ def main():
     window = MainWindow()
     window.show()
 
-    sys.exit(app.exec())
+    exit_code = app.exec()
+    log.info(f"=== Parson exiting (code={exit_code}) ===")
+    fault_file.close()
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":
