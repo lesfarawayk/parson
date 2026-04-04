@@ -747,12 +747,12 @@ class MainWindow(QMainWindow):
             pages_total = stats.get('pages_total', 0)
 
             text = (
-                f"Torrents: {stats['total_torrents']}  |  "
-                f"Parsed: {stats['parsed']}  |  "
-                f"Approved: {stats['approved']}  |  "
-                f"Skipped: {stats['skipped']}  |  "
-                f"Errors: {stats['errors']}  |  "
-                f"Fresh emails: {stats['fresh_emails']}"
+                f"DB: {stats['total_torrents']} torrents  |  "
+                f"Scanned: {stats.get('worker_saved', 0)} saved, "
+                f"{stats.get('worker_filtered', 0)} filtered, "
+                f"{stats.get('worker_duplicate', 0)} dupes, "
+                f"{stats.get('worker_error', 0)} errors  |  "
+                f"Emails: {stats['fresh_emails']} fresh"
             )
             self.lbl_stats.setText(text)
 

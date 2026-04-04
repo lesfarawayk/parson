@@ -58,6 +58,9 @@ class ParserWorker(BaseWorker):
         self._current_page_num: int | None = None
         self._topic_queue: list[dict] = []
 
+        # Cumulative stats across all pages
+        self.total_stats = {"saved": 0, "filtered": 0, "duplicate": 0, "error": 0}
+
     # ── Account lifecycle ──────────────────────────────────────
 
     def _new_account_cycle(self, cfg: dict, profile: TrackerProfile) -> bool:
@@ -213,12 +216,15 @@ class ParserWorker(BaseWorker):
                 if self._current_page_num is not None:
                     self.repo.complete_page(category_id, self._current_page_num, self.worker_id)
                     ps = getattr(self, "_page_stats", {})
+                    # Accumulate into total
+                    for k in ("saved", "filtered", "duplicate", "error"):
+                        self.total_stats[k] = self.total_stats.get(k, 0) + ps.get(k, 0)
+                    ts = self.total_stats
                     self._emit_status(
                         f"Page {self._current_page_num}/{pages_end} done — "
-                        f"saved: {ps.get('saved', 0)}, "
-                        f"filtered: {ps.get('filtered', 0)}, "
-                        f"dupes: {ps.get('duplicate', 0)}, "
-                        f"errors: {ps.get('error', 0)}"
+                        f"page: +{ps.get('saved', 0)} saved, +{ps.get('filtered', 0)} filtered | "
+                        f"total: {ts['saved']} saved, {ts['filtered']} filtered, "
+                        f"{ts['duplicate']} dupes, {ts['error']} err"
                     )
 
                 self._current_page_num = self.repo.claim_next_page(category_id, self.worker_id)

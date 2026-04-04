@@ -85,7 +85,18 @@ class WorkerCoordinator:
             w.request_resume()
 
     def get_stats(self) -> dict:
-        return self.repo.get_stats()
+        stats = self.repo.get_stats()
+        # Aggregate worker-level counters
+        agg = {"saved": 0, "filtered": 0, "duplicate": 0, "error": 0}
+        for w in self.workers:
+            if hasattr(w, "total_stats"):
+                for k in agg:
+                    agg[k] += w.total_stats.get(k, 0)
+        stats["worker_saved"] = agg["saved"]
+        stats["worker_filtered"] = agg["filtered"]
+        stats["worker_duplicate"] = agg["duplicate"]
+        stats["worker_error"] = agg["error"]
+        return stats
 
     def get_worker_statuses(self) -> list[dict]:
         return [
