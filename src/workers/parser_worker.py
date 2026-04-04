@@ -199,6 +199,10 @@ class ParserWorker(BaseWorker):
         if not self._ensure_account(cfg, profile):
             return
 
+        pages_start = cfg["tracker"]["pages_start"]
+        pages_end = cfg["tracker"]["pages_end"]
+        pages_total = max(0, pages_end - pages_start + 1)
+
         while not self.should_stop:
             self.wait_if_paused()
             if self.should_stop:
@@ -208,21 +212,21 @@ class ParserWorker(BaseWorker):
             if not self._topic_queue:
                 if self._current_page_num is not None:
                     self.repo.complete_page(category_id, self._current_page_num, self.worker_id)
-                    self._emit_status(f"Page {self._current_page_num} completed")
+                    self._emit_status(f"Page {self._current_page_num}/{pages_end} done")
 
                 self._current_page_num = self.repo.claim_next_page(category_id, self.worker_id)
                 if self._current_page_num is None:
                     self._emit_status("All pages processed!")
                     break
 
-                self._emit_status(f"Scanning page {self._current_page_num}...")
+                self._emit_status(f"Scanning page {self._current_page_num}/{pages_end}...")
                 try:
                     topics = get_topic_list(self.page, profile, category_id, self._current_page_num)
                     self._topic_queue = list(topics)
-                    self._emit_status(f"Page {self._current_page_num}: {len(topics)} topics")
+                    self._emit_status(f"Page {self._current_page_num}/{pages_end}: {len(topics)} topics found")
                 except Exception as e:
                     self.log.error(f"Failed to scan page {self._current_page_num}: {e}")
-                    self._emit_status(f"Scan error: {e}")
+                    self._emit_status(f"Scan error p.{self._current_page_num}: {e}")
                     self.repo.release_page(category_id, self.worker_id)
                     self._current_page_num = None
                     continue

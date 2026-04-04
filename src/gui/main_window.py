@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QTextEdit, QTableWidget, QTableWidgetItem,
     QGroupBox, QFormLayout, QLineEdit, QSpinBox, QListWidget, QComboBox,
     QHeaderView, QSplitter, QMessageBox, QPlainTextEdit, QScrollArea, QCheckBox,
+    QProgressBar,
 )
 from PySide6.QtCore import Qt, QTimer, Signal, QObject
 from PySide6.QtGui import QColor
@@ -89,10 +90,24 @@ class MainWindow(QMainWindow):
 
         # Stats group
         stats_group = QGroupBox("Statistics")
-        stats_layout = QHBoxLayout(stats_group)
+        stats_layout = QVBoxLayout(stats_group)
         self.lbl_stats = QLabel("No data yet")
         self.lbl_stats.setWordWrap(True)
         stats_layout.addWidget(self.lbl_stats)
+
+        # Page progress bar
+        progress_row = QHBoxLayout()
+        self.lbl_pages = QLabel("Pages: —")
+        self.page_progress = QProgressBar()
+        self.page_progress.setMinimum(0)
+        self.page_progress.setMaximum(100)
+        self.page_progress.setValue(0)
+        self.page_progress.setTextVisible(True)
+        self.page_progress.setFormat("%v / %m  (%p%)")
+        progress_row.addWidget(self.lbl_pages)
+        progress_row.addWidget(self.page_progress, 1)
+        stats_layout.addLayout(progress_row)
+
         splitter.addWidget(stats_group)
 
         # Workers table
@@ -702,16 +717,28 @@ class MainWindow(QMainWindow):
             return
         try:
             stats = self.coordinator.get_stats()
+            pages_done = stats['pages_completed']
+            pages_wip = stats.get('pages_in_progress', 0)
+            pages_total = stats.get('pages_total', 0)
+
             text = (
                 f"Torrents: {stats['total_torrents']}  |  "
                 f"Parsed: {stats['parsed']}  |  "
                 f"Approved: {stats['approved']}  |  "
                 f"Skipped: {stats['skipped']}  |  "
-                f"Errors: {stats['errors']}\n"
-                f"Fresh emails: {stats['fresh_emails']}  |  "
-                f"Pages done: {stats['pages_completed']}"
+                f"Errors: {stats['errors']}  |  "
+                f"Fresh emails: {stats['fresh_emails']}"
             )
             self.lbl_stats.setText(text)
+
+            # Update page progress bar
+            self.page_progress.setMaximum(max(pages_total, 1))
+            self.page_progress.setValue(pages_done)
+            self.lbl_pages.setText(
+                f"Pages: {pages_done} done"
+                + (f", {pages_wip} scanning" if pages_wip else "")
+            )
+
             # Auto-refresh tables every cycle
             self._refresh_email_table()
             self._refresh_blocked_table()

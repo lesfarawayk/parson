@@ -345,6 +345,16 @@ class Repository:
 
     def get_stats(self) -> dict:
         with _lock, self._session() as s:
+            from ..config_manager import load_config
+            cfg = load_config()
+            pages_start = cfg["tracker"]["pages_start"]
+            pages_end = cfg["tracker"]["pages_end"]
+            pages_total = max(0, pages_end - pages_start + 1)
+            pages_completed = s.query(PageProgress).filter(PageProgress.is_completed == True).count()
+            pages_in_progress = s.query(PageProgress).filter(
+                and_(PageProgress.is_completed == False, PageProgress.worker_id != None)
+            ).count()
+
             return {
                 "total_torrents": s.query(Torrent).count(),
                 "parsed": s.query(Torrent).filter(Torrent.status == TorrentStatus.PARSED).count(),
@@ -352,5 +362,7 @@ class Repository:
                 "skipped": s.query(Torrent).filter(Torrent.status == TorrentStatus.SKIPPED).count(),
                 "errors": s.query(Torrent).filter(Torrent.status == TorrentStatus.ERROR).count(),
                 "fresh_emails": s.query(EmailAccount).filter(EmailAccount.status == AccountStatus.FRESH).count(),
-                "pages_completed": s.query(PageProgress).filter(PageProgress.is_completed == True).count(),
+                "pages_completed": pages_completed,
+                "pages_in_progress": pages_in_progress,
+                "pages_total": pages_total,
             }
