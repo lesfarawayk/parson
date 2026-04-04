@@ -110,7 +110,16 @@ class WorkerCoordinator:
         stats["worker_duplicate"] = agg["duplicate"]
         stats["worker_error"] = agg["error"]
         stats["elapsed"] = time.monotonic() - earliest_start if earliest_start else 0
-        stats["avg_page_time"] = sum(all_page_times) / len(all_page_times) if all_page_times else 0
+        avg_page = sum(all_page_times) / len(all_page_times) if all_page_times else 0
+        stats["avg_page_time"] = avg_page
+
+        # ETA: remaining pages / (active workers processing in parallel)
+        active_workers = sum(1 for w in self.workers if getattr(w, "page", None) is not None)
+        active_workers = max(active_workers, 1)
+        pages_remaining = stats["pages_total"] - stats["pages_completed"] - stats["pages_in_progress"]
+        pages_remaining = max(pages_remaining, 0)
+        stats["eta"] = (pages_remaining / active_workers) * avg_page if avg_page > 0 else 0
+        stats["active_workers"] = active_workers
         return stats
 
     def get_worker_statuses(self) -> list[dict]:

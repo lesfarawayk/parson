@@ -767,8 +767,10 @@ class MainWindow(QMainWindow):
 
             elapsed = stats.get('elapsed', 0)
             avg_page = stats.get('avg_page_time', 0)
+            eta = stats.get('eta', 0)
             elapsed_str = _fmt_duration(elapsed) if elapsed > 0 else "—"
             avg_str = f"{avg_page:.0f}s" if avg_page > 0 else "—"
+            eta_str = _fmt_duration(eta) if eta > 0 else "—"
 
             text = (
                 f"DB: {stats['total_torrents']} torrents  |  "
@@ -776,8 +778,8 @@ class MainWindow(QMainWindow):
                 f"Filtered: {stats.get('worker_filtered', 0)}, "
                 f"Dupes: {stats.get('worker_duplicate', 0)}, "
                 f"Errors: {stats.get('worker_error', 0)}  |  "
-                f"Emails: {stats['fresh_emails']}  |  "
-                f"Time: {elapsed_str} (avg {avg_str}/page)"
+                f"Time: {elapsed_str} (avg {avg_str}/page)  |  "
+                f"ETA: {eta_str}"
             )
             self.lbl_stats.setText(text)
 
@@ -787,6 +789,7 @@ class MainWindow(QMainWindow):
             self.lbl_pages.setText(
                 f"Pages: {pages_done} done"
                 + (f", {pages_wip} scanning" if pages_wip else "")
+                + f"  —  ETA: {eta_str}"
             )
 
             # Auto-refresh tables every cycle
