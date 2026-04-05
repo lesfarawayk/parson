@@ -25,6 +25,11 @@
         "email_type": 0,
         "batch_size": 3
     },
+    "downloader": {
+        "worker_count": 1,
+        "share_email": true,
+        "max_per_account": 50
+    },
     "telegram": {
         "bot_token": "",
         "chat_id": ""

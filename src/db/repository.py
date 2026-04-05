@@ -369,6 +369,70 @@ class Repository:
             t = s.query(Torrent).filter(Torrent.topic_id == topic_id).first()
             return t.cover_data if t else None
 
+    def claim_torrent_for_download(self, worker_id: str) -> dict | None:
+        """Claim a torrent that has download_url but no torrent_file. Returns dict or None."""
+        with _lock, self._session() as s:
+            t = s.query(Torrent).filter(
+                and_(
+                    Torrent.download_url != None,
+                    Torrent.download_url != "",
+                    Torrent.torrent_file == None,
+                    Torrent.status != TorrentStatus.DOWNLOADING,
+                    Torrent.status != TorrentStatus.ERROR,
+                )
+            ).first()
+            if not t:
+                return None
+            t.status = TorrentStatus.DOWNLOADING
+            s.commit()
+            return {
+                "topic_id": t.topic_id,
+                "download_url": t.download_url,
+                "film_name": t.film_name or "",
+                "title_raw": t.title_raw or "",
+            }
+
+    def save_torrent_file(self, topic_id: str, data: bytes):
+        """Save downloaded .torrent file bytes and mark as DOWNLOADED."""
+        with _lock, self._session() as s:
+            t = s.query(Torrent).filter(Torrent.topic_id == topic_id).first()
+            if t:
+                t.torrent_file = data
+                t.status = TorrentStatus.DOWNLOADED
+                t.downloaded_at = datetime.utcnow()
+                s.commit()
+
+    def release_downloading(self, worker_id: str = ""):
+        """Release all DOWNLOADING torrents back to PARSED (for restart)."""
+        with _lock, self._session() as s:
+            rows = s.query(Torrent).filter(Torrent.status == TorrentStatus.DOWNLOADING).all()
+            count = len(rows)
+            for t in rows:
+                t.status = TorrentStatus.PARSED
+            if count:
+                s.commit()
+            return count
+
+    def get_download_stats(self) -> dict:
+        """Stats for the download tab."""
+        with _lock, self._session() as s:
+            total_with_url = s.query(Torrent).filter(
+                and_(Torrent.download_url != None, Torrent.download_url != "")
+            ).count()
+            already_downloaded = s.query(Torrent).filter(
+                Torrent.status == TorrentStatus.DOWNLOADED
+            ).count()
+            downloading = s.query(Torrent).filter(
+                Torrent.status == TorrentStatus.DOWNLOADING
+            ).count()
+            pending = total_with_url - already_downloaded - downloading
+            return {
+                "total_with_url": total_with_url,
+                "downloaded": already_downloaded,
+                "downloading": downloading,
+                "pending": max(pending, 0),
+            }
+
     def update_torrent_status(self, topic_id: str, new_status: str):
         with _lock, self._session() as s:
             t = s.query(Torrent).filter(Torrent.topic_id == topic_id).first()

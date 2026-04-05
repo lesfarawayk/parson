@@ -88,6 +88,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._build_emails_tab(), "Emails")
         tabs.addTab(self._build_blocked_domains_tab(), "Blocked Domains")
         tabs.addTab(self._build_pages_tab(), "Pages")
+        tabs.addTab(self._build_downloader_tab(), "Downloader")
         tabs.addTab(self._build_config_tab(), "Settings")
         tabs.addTab(self._build_log_tab(), "Log")
         layout.addWidget(tabs)
@@ -569,6 +570,160 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Done", f"Cleared {count} page records.")
             self._refresh_pages_grid()
 
+    # ── Downloader tab ─────────────────────────────────────────
+
+    def _build_downloader_tab(self) -> QWidget:
+        w = QWidget()
+        layout = QVBoxLayout(w)
+
+        # Controls
+        ctrl = QHBoxLayout()
+        self.dl_btn_start = QPushButton("Start Downloads")
+        self.dl_btn_start.clicked.connect(self._on_start_downloads)
+        self.dl_btn_stop = QPushButton("Stop")
+        self.dl_btn_stop.clicked.connect(self._on_stop_downloads)
+        self.dl_btn_stop.setEnabled(False)
+
+        ctrl.addWidget(self.dl_btn_start)
+        ctrl.addWidget(self.dl_btn_stop)
+
+        ctrl.addWidget(QLabel("  Workers:"))
+        self.dl_worker_count = QSpinBox()
+        self.dl_worker_count.setRange(1, 10)
+        self.dl_worker_count.setValue(1)
+        ctrl.addWidget(self.dl_worker_count)
+
+        self.dl_share_email = QCheckBox("Share 1 email")
+        self.dl_share_email.setChecked(True)
+        ctrl.addWidget(self.dl_share_email)
+
+        ctrl.addWidget(QLabel("  Max/account:"))
+        self.dl_max_per = QSpinBox()
+        self.dl_max_per.setRange(1, 500)
+        self.dl_max_per.setValue(50)
+        ctrl.addWidget(self.dl_max_per)
+
+        ctrl.addStretch()
+        layout.addLayout(ctrl)
+
+        # Stats
+        self.dl_stats_label = QLabel("Ready — configure and press Start")
+        self.dl_stats_label.setWordWrap(True)
+        self.dl_stats_label.setStyleSheet("font-size: 13px; padding: 6px;")
+        layout.addWidget(self.dl_stats_label)
+
+        # Progress bar
+        dl_progress_row = QHBoxLayout()
+        self.dl_progress_label = QLabel("Progress:")
+        self.dl_progress_bar = QProgressBar()
+        self.dl_progress_bar.setTextVisible(True)
+        self.dl_progress_bar.setFormat("%v / %m  (%p%)")
+        dl_progress_row.addWidget(self.dl_progress_label)
+        dl_progress_row.addWidget(self.dl_progress_bar, 1)
+        layout.addLayout(dl_progress_row)
+
+        # Workers table
+        self.dl_workers_table = QTableWidget(0, 3)
+        self.dl_workers_table.setHorizontalHeaderLabels(["Worker", "State", "Status"])
+        self.dl_workers_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.dl_workers_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        layout.addWidget(self.dl_workers_table)
+
+        # Log
+        self.dl_log = QPlainTextEdit()
+        self.dl_log.setReadOnly(True)
+        self.dl_log.setMaximumBlockCount(3000)
+        self.dl_log.setMaximumHeight(180)
+        layout.addWidget(self.dl_log)
+
+        # Refresh timer for download stats
+        self.dl_timer = QTimer(self)
+        self.dl_timer.timeout.connect(self._refresh_dl_stats)
+        self.dl_timer.start(2000)
+
+        # Status signal for download workers
+        self.dl_status_signal = StatusSignal()
+        self.dl_status_signal.updated.connect(self._on_dl_worker_status)
+        self.coordinator.set_dl_status_callback(
+            lambda wid, state, msg: self.dl_status_signal.updated.emit(wid, state, msg)
+        )
+
+        # Load config values
+        cfg = load_config()
+        dl_cfg = cfg.get("downloader", {})
+        self.dl_worker_count.setValue(dl_cfg.get("worker_count", 1))
+        self.dl_share_email.setChecked(dl_cfg.get("share_email", True))
+        self.dl_max_per.setValue(dl_cfg.get("max_per_account", 50))
+
+        return w
+
+    def _on_start_downloads(self):
+        # Save downloader config
+        cfg = load_config()
+        cfg["downloader"] = {
+            "worker_count": self.dl_worker_count.value(),
+            "share_email": self.dl_share_email.isChecked(),
+            "max_per_account": self.dl_max_per.value(),
+        }
+        save_config(cfg)
+
+        self.dl_btn_start.setEnabled(False)
+        self.dl_btn_stop.setEnabled(True)
+        self.coordinator.start_downloads(self.dl_worker_count.value())
+
+    def _on_stop_downloads(self):
+        self.dl_btn_stop.setEnabled(False)
+        self.coordinator.stop_downloads()
+        self.dl_btn_start.setEnabled(True)
+
+    def _on_dl_worker_status(self, worker_id: str, state: str, message: str):
+        """Update download workers table + log."""
+        # Log every status message
+        self.dl_log.appendPlainText(f"[{worker_id}] {message}")
+
+        for row in range(self.dl_workers_table.rowCount()):
+            if self.dl_workers_table.item(row, 0) and self.dl_workers_table.item(row, 0).text() == worker_id:
+                self.dl_workers_table.setItem(row, 1, QTableWidgetItem(state))
+                self.dl_workers_table.setItem(row, 2, QTableWidgetItem(message))
+                color = {"running": QColor(200, 255, 200), "error": QColor(255, 200, 200),
+                         "stopped": QColor(220, 220, 220)}.get(state)
+                if color:
+                    for col in range(3):
+                        item = self.dl_workers_table.item(row, col)
+                        if item:
+                            item.setBackground(color)
+                return
+
+        row = self.dl_workers_table.rowCount()
+        self.dl_workers_table.insertRow(row)
+        self.dl_workers_table.setItem(row, 0, QTableWidgetItem(worker_id))
+        self.dl_workers_table.setItem(row, 1, QTableWidgetItem(state))
+        self.dl_workers_table.setItem(row, 2, QTableWidgetItem(message))
+
+    def _refresh_dl_stats(self):
+        if not self.coordinator.is_dl_running:
+            return
+        try:
+            stats = self.coordinator.get_download_stats()
+            total = stats["total_with_url"]
+            downloaded = stats["downloaded"]
+            pending = stats["pending"]
+            downloading = stats["downloading"]
+
+            self.dl_stats_label.setText(
+                f"Total with URL: {total}  |  "
+                f"Downloaded: {downloaded}  |  "
+                f"In progress: {downloading}  |  "
+                f"Pending: {pending}  |  "
+                f"Session: +{stats.get('session_downloaded', 0)} done, "
+                f"{stats.get('session_errors', 0)} errors"
+            )
+
+            self.dl_progress_bar.setMaximum(max(total, 1))
+            self.dl_progress_bar.setValue(downloaded)
+        except Exception:
+            pass
+
     # ── Config tab ──────────────────────────────────────────────
 
     def _build_config_tab(self) -> QWidget:
@@ -888,7 +1043,8 @@ class MainWindow(QMainWindow):
             pass
 
     def closeEvent(self, event):
-        if self.coordinator.is_running:
+        running = self.coordinator.is_running or self.coordinator.is_dl_running
+        if running:
             reply = QMessageBox.question(
                 self, "Quit", "Workers are running. Stop them and quit?",
                 QMessageBox.Yes | QMessageBox.No
@@ -897,6 +1053,7 @@ class MainWindow(QMainWindow):
                 event.ignore()
                 return
             self.coordinator.stop()
+            self.coordinator.stop_downloads()
         event.accept()
 
 

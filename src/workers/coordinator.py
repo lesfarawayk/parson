@@ -14,6 +14,7 @@ from typing import Callable
 from ..db.repository import Repository
 from ..config_manager import load_config
 from .parser_worker import ParserWorker
+from .download_worker import DownloadWorker
 from .base_worker import BaseWorker, WorkerState
 
 log = logging.getLogger(__name__)
@@ -65,8 +66,16 @@ class WorkerCoordinator:
         self._max_restarts = 5  # per worker
         self._restart_counts: dict[str, int] = {}
 
+        # Download workers (separate pool)
+        self.dl_workers: list[BaseWorker] = []
+        self._dl_status_callback: Callable | None = None
+        self._dl_running = False
+
     def set_status_callback(self, cb: Callable):
         self._status_callback = cb
+
+    def set_dl_status_callback(self, cb: Callable):
+        self._dl_status_callback = cb
 
     def _get_proxy(self, index: int) -> dict | None:
         cfg = load_config()
@@ -233,3 +242,56 @@ class WorkerCoordinator:
     @property
     def is_running(self) -> bool:
         return self._running
+
+    # ── Download workers ──────────────────────────────────────
+
+    def start_downloads(self, worker_count: int = 1):
+        """Launch download workers to fetch .torrent files."""
+        if self._dl_running:
+            return
+        self._dl_running = True
+
+        # Release stuck DOWNLOADING entries from previous run
+        released = self.repo.release_downloading()
+        if released:
+            log.info(f"Released {released} stuck DOWNLOADING torrents")
+
+        for i in range(worker_count):
+            wid = f"dl-{i}"
+            w = DownloadWorker(wid, self.repo, proxy=self._get_proxy(i))
+            if self._dl_status_callback:
+                w.add_status_callback(self._dl_status_callback)
+            self.dl_workers.append(w)
+            w.start()
+
+        log.info(f"Started {worker_count} download workers")
+
+    def stop_downloads(self):
+        """Stop all download workers."""
+        if not self._dl_running:
+            return
+        log.info("Stopping download workers...")
+        for w in self.dl_workers:
+            w.request_stop()
+        for w in self.dl_workers:
+            w.join(timeout=30)
+        self.dl_workers.clear()
+        self._dl_running = False
+        log.info("Download workers stopped")
+
+    def get_download_stats(self) -> dict:
+        """Stats for the download tab."""
+        stats = self.repo.get_download_stats()
+        # Aggregate from workers
+        agg = {"downloaded": 0, "errors": 0}
+        for w in self.dl_workers:
+            if hasattr(w, "total_stats"):
+                agg["downloaded"] += w.total_stats.get("downloaded", 0)
+                agg["errors"] += w.total_stats.get("errors", 0)
+        stats["session_downloaded"] = agg["downloaded"]
+        stats["session_errors"] = agg["errors"]
+        return stats
+
+    @property
+    def is_dl_running(self) -> bool:
+        return self._dl_running
