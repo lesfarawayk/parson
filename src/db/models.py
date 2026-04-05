@@ -127,21 +127,40 @@ def init_db(db_path: str = ""):
     path.parent.mkdir(parents=True, exist_ok=True)
     engine = create_engine(f"sqlite:///{path}", echo=False)
 
-    # Check if torrents table exists but has old schema (missing title_raw column).
-    # If so, drop and recreate it so the new columns are available.
+    from sqlalchemy import text
+
     with engine.connect() as conn:
         try:
-            cols = [row[1] for row in conn.execute(
-                __import__("sqlalchemy").text("PRAGMA table_info(torrents)")
-            )]
-            if cols and ("title_raw" not in cols or "actors" not in cols or "cover_data" not in cols or "torrent_file" not in cols):
-                conn.execute(__import__("sqlalchemy").text("DROP TABLE torrents"))
-                conn.commit()
+            cols = [row[1] for row in conn.execute(text("PRAGMA table_info(torrents)"))]
+            if cols:
+                # Critical columns that can't be added (schema too different) — drop only if missing
+                if "title_raw" not in cols:
+                    conn.execute(text("DROP TABLE torrents"))
+                    conn.commit()
+                else:
+                    # Safely add missing columns with ALTER TABLE (preserves data!)
+                    _add_column_if_missing(conn, cols, "actors", "TEXT")
+                    _add_column_if_missing(conn, cols, "cover_data", "BLOB")
+                    _add_column_if_missing(conn, cols, "torrent_file", "BLOB")
+                    _add_column_if_missing(conn, cols, "cover_url", "VARCHAR(1000)")
+                    _add_column_if_missing(conn, cols, "cover_path", "VARCHAR(1000)")
+                    _add_column_if_missing(conn, cols, "download_url", "VARCHAR(1000)")
+                    _add_column_if_missing(conn, cols, "downloaded_at", "DATETIME")
+                    _add_column_if_missing(conn, cols, "description", "TEXT")
+                    conn.commit()
         except Exception:
             pass
 
     Base.metadata.create_all(engine)
     return engine
+
+
+def _add_column_if_missing(conn, existing_cols: list[str], col_name: str, col_type: str):
+    """Add a column to the torrents table if it doesn't exist yet."""
+    if col_name not in existing_cols:
+        from sqlalchemy import text
+        conn.execute(text(f"ALTER TABLE torrents ADD COLUMN {col_name} {col_type}"))
+
 
 
 def get_session_factory(engine=None):

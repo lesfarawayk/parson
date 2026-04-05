@@ -378,6 +378,7 @@ class Repository:
                     Torrent.download_url != "",
                     Torrent.torrent_file == None,
                     Torrent.status != TorrentStatus.DOWNLOADING,
+                    Torrent.status != TorrentStatus.DOWNLOADED,
                     Torrent.status != TorrentStatus.ERROR,
                 )
             ).first()
