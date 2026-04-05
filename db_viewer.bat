@@ -1,5 +1,5 @@
 @echo off
-:: Parson DB Viewer — standalone database browser
+:: Parson DB Editor — standalone database editor
 cd /d "%~dp0"
 
 if not exist "venv\Scripts\python.exe" (

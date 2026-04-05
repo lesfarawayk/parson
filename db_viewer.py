@@ -1,11 +1,11 @@
 """
-Parson DB Viewer — standalone program for browsing the torrent database.
+Parson DB Editor — standalone program for browsing and editing the torrent database.
 No dependencies beyond PySide6 and sqlite3 (built-in).
 Run: python db_viewer.py
 """
 
 import json
-import os
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -13,7 +13,7 @@ from pathlib import Path
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTableWidget, QTableWidgetItem, QHeaderView, QComboBox, QLabel,
-    QPushButton, QLineEdit, QGroupBox, QPlainTextEdit, QSplitter,
+    QPushButton, QLineEdit, QPlainTextEdit, QSplitter,
     QFileDialog, QMessageBox, QAbstractItemView,
 )
 from PySide6.QtCore import Qt
@@ -32,9 +32,9 @@ COLUMNS = [
     ("tags", "Tags", 160),
     ("devices", "Devices", 70),
     ("duration", "Duration", 65),
-    ("file_size", "Size", 65),
-    ("seeds", "Seeds", 45),
-    ("peers", "Peers", 45),
+    ("file_size", "Size", 80),
+    ("seeds", "Seeds", 50),
+    ("peers", "Peers", 50),
     ("status", "Status", 70),
 ]
 
@@ -51,7 +51,6 @@ STATUS_COLORS = {
 
 
 def _json_pretty(raw: str) -> str:
-    """Parse JSON list and join with commas. Falls back to raw string."""
     if not raw or raw == "[]":
         return ""
     try:
@@ -63,17 +62,60 @@ def _json_pretty(raw: str) -> str:
     return raw
 
 
-class DBViewer(QMainWindow):
+def _parse_size_bytes(size_str: str) -> float:
+    """Parse '40.73 GB' / '512 MB' / '1.2 TB' into bytes for sorting."""
+    if not size_str:
+        return 0
+    m = re.match(r"([\d.]+)\s*(TB|GB|MB|KB|B)", str(size_str).strip(), re.IGNORECASE)
+    if not m:
+        return 0
+    val = float(m.group(1))
+    unit = m.group(2).upper()
+    multipliers = {"B": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3, "TB": 1024**4}
+    return val * multipliers.get(unit, 0)
+
+
+def _parse_duration_seconds(dur_str: str) -> int:
+    """Parse '01:02:05' or '31:52' into total seconds for sorting."""
+    if not dur_str:
+        return 0
+    parts = str(dur_str).strip().split(":")
+    try:
+        if len(parts) == 3:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+        elif len(parts) == 2:
+            return int(parts[0]) * 60 + int(parts[1])
+        else:
+            return int(parts[0])
+    except (ValueError, IndexError):
+        return 0
+
+
+class SortableItem(QTableWidgetItem):
+    """Table item that sorts by a numeric sort_value instead of text."""
+    def __init__(self, text: str, sort_value=None):
+        super().__init__(text)
+        self._sort_value = sort_value if sort_value is not None else text
+
+    def __lt__(self, other):
+        if isinstance(other, SortableItem):
+            try:
+                return self._sort_value < other._sort_value
+            except TypeError:
+                return str(self._sort_value) < str(other._sort_value)
+        return super().__lt__(other)
+
+
+class DBEditor(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Parson DB Viewer")
+        self.setWindowTitle("Parson DB Editor")
         self.setMinimumSize(1100, 650)
         self.db_path: Path | None = None
         self.conn: sqlite3.Connection | None = None
         self._rows: list[dict] = []
         self._build_ui()
 
-        # Auto-open default DB if exists
         if DB_DEFAULT.exists():
             self._open_db(DB_DEFAULT)
 
@@ -104,7 +146,6 @@ class DBViewer(QMainWindow):
                    "downloading", "downloaded", "error"]:
             self.filter_status.addItem(s.capitalize(), s)
         self.filter_status.currentIndexChanged.connect(self._load_data)
-
         filt.addWidget(self.filter_status)
 
         filt.addWidget(QLabel("  Search:"))
@@ -116,6 +157,10 @@ class DBViewer(QMainWindow):
         self.lbl_count = QLabel("")
         filt.addWidget(self.lbl_count)
         filt.addStretch()
+
+        btn_delete_sel = QPushButton("Delete Selected")
+        btn_delete_sel.clicked.connect(self._on_delete_selected)
+        filt.addWidget(btn_delete_sel)
 
         btn_clear = QPushButton("Clear Database")
         btn_clear.clicked.connect(self._on_clear_db)
@@ -131,10 +176,11 @@ class DBViewer(QMainWindow):
         self.table.setHorizontalHeaderLabels([c[1] for c in COLUMNS])
         for i, (_, _, w) in enumerate(COLUMNS):
             self.table.setColumnWidth(i, w)
-        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)  # Film Name
-        self.table.horizontalHeader().setSectionResizeMode(7, QHeaderView.Stretch)  # Tags
+        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(7, QHeaderView.Stretch)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setAlternatingRowColors(True)
         self.table.setSortingEnabled(True)
         self.table.currentCellChanged.connect(self._on_row_selected)
@@ -145,18 +191,15 @@ class DBViewer(QMainWindow):
         detail_layout = QHBoxLayout(detail_w)
         detail_layout.setContentsMargins(4, 4, 4, 4)
 
-        # Cover image
         self.cover_label = QLabel()
         self.cover_label.setFixedSize(180, 240)
         self.cover_label.setAlignment(Qt.AlignCenter)
-        self.cover_label.setStyleSheet("background: #222; border: 1px solid #555;")
-        self.cover_label.setText("No cover")
         self.cover_label.setStyleSheet(
             "background: #222; border: 1px solid #555; color: #888; font-size: 11px;"
         )
+        self.cover_label.setText("No cover")
         detail_layout.addWidget(self.cover_label)
 
-        # Text details
         self.detail_text = QPlainTextEdit()
         self.detail_text.setReadOnly(True)
         mono = QFont("Consolas", 9)
@@ -197,12 +240,12 @@ class DBViewer(QMainWindow):
         try:
             if status:
                 cur = self.conn.execute(
-                    "SELECT * FROM torrents WHERE status = ? ORDER BY id DESC LIMIT 5000",
+                    "SELECT * FROM torrents WHERE status = ? ORDER BY id DESC",
                     (status,),
                 )
             else:
                 cur = self.conn.execute(
-                    "SELECT * FROM torrents ORDER BY id DESC LIMIT 5000"
+                    "SELECT * FROM torrents ORDER BY id DESC"
                 )
             rows = cur.fetchall()
             col_names = [desc[0] for desc in cur.description]
@@ -246,20 +289,32 @@ class DBViewer(QMainWindow):
                 raw = r.get(key, "")
                 if raw is None:
                     raw = ""
+
                 # Pretty-print JSON columns
                 if key in ("formats", "tags", "devices", "actors"):
                     text = _json_pretty(str(raw))
                 else:
                     text = str(raw)
 
-                item = QTableWidgetItem(text)
-                # Numeric sort for numeric columns
-                if key in ("id", "seeds", "peers", "page_number"):
-                    item.setData(Qt.DisplayRole, text)
+                # Create sortable items for numeric/special columns
+                if key in ("id", "seeds", "peers"):
                     try:
-                        item.setData(Qt.UserRole, int(raw) if raw else 0)
+                        sort_val = int(raw) if raw else 0
                     except (ValueError, TypeError):
-                        pass
+                        sort_val = 0
+                    item = SortableItem(text, sort_val)
+                elif key == "file_size":
+                    item = SortableItem(text, _parse_size_bytes(text))
+                elif key == "duration":
+                    item = SortableItem(text, _parse_duration_seconds(text))
+                elif key == "year":
+                    try:
+                        sort_val = int(raw) if raw else 0
+                    except (ValueError, TypeError):
+                        sort_val = 0
+                    item = SortableItem(text, sort_val)
+                else:
+                    item = QTableWidgetItem(text)
 
                 color = STATUS_COLORS.get(str(r.get("status", "")))
                 if color:
@@ -272,7 +327,6 @@ class DBViewer(QMainWindow):
         if row < 0:
             self.detail_text.clear()
             return
-        # Get topic_id from the actual table cell (column 1 = topic_id) to handle sorting
         topic_item = self.table.item(row, 1)
         if not topic_item or not hasattr(self, "_rows_by_id"):
             self.detail_text.clear()
@@ -339,6 +393,39 @@ class DBViewer(QMainWindow):
         ]
         self.detail_text.setPlainText("\n".join(lines))
 
+    # ── Edit operations ───────────────────────────────────────
+
+    def _on_delete_selected(self):
+        if not self.conn:
+            return
+        rows = set(idx.row() for idx in self.table.selectedIndexes())
+        if not rows:
+            return
+        topic_ids = []
+        for row in rows:
+            item = self.table.item(row, 1)  # topic_id column
+            if item:
+                topic_ids.append(item.text())
+        if not topic_ids:
+            return
+
+        reply = QMessageBox.question(
+            self, "Delete Selected",
+            f"Delete {len(topic_ids)} selected torrents from the database?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            try:
+                placeholders = ",".join("?" for _ in topic_ids)
+                self.conn.execute(
+                    f"DELETE FROM torrents WHERE topic_id IN ({placeholders})",
+                    topic_ids,
+                )
+                self.conn.commit()
+                self._load_data()
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed: {e}")
+
     def _on_clear_db(self):
         if not self.conn:
             return
@@ -366,7 +453,7 @@ class DBViewer(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    window = DBViewer()
+    window = DBEditor()
     window.show()
     sys.exit(app.exec())
 
