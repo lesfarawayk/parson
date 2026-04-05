@@ -121,10 +121,11 @@ class Torrent(Base):
     downloaded_at = Column(DateTime, nullable=True)   # for download workers later
 
 
-def init_db():
+def init_db(db_path: str = ""):
     """Initialize database, create tables. Auto-migrates torrents table if schema is outdated."""
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    engine = create_engine(f"sqlite:///{DB_PATH}", echo=False)
+    path = Path(db_path) if db_path else DB_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    engine = create_engine(f"sqlite:///{path}", echo=False)
 
     # Check if torrents table exists but has old schema (missing title_raw column).
     # If so, drop and recreate it so the new columns are available.

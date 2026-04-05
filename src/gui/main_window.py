@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QTextEdit, QTableWidget, QTableWidgetItem,
     QGroupBox, QFormLayout, QLineEdit, QSpinBox, QListWidget, QComboBox,
     QHeaderView, QSplitter, QMessageBox, QPlainTextEdit, QScrollArea, QCheckBox,
-    QProgressBar,
+    QProgressBar, QFileDialog,
 )
 from PySide6.QtCore import Qt, QTimer, Signal, QObject, QRect
 from PySide6.QtGui import QColor, QPixmap, QPainter, QBrush, QPen, QFont as QGuiFont
@@ -576,6 +576,20 @@ class MainWindow(QMainWindow):
         w = QWidget()
         layout = QVBoxLayout(w)
 
+        # Database file selector
+        db_row = QHBoxLayout()
+        db_row.addWidget(QLabel("Database:"))
+        self.dl_db_path = QLineEdit()
+        self.dl_db_path.setReadOnly(True)
+        from ..db.models import DB_PATH
+        self.dl_db_path.setText(str(DB_PATH))
+        self.dl_db_path.setStyleSheet("color: #080;")
+        btn_browse_db = QPushButton("Browse...")
+        btn_browse_db.clicked.connect(self._on_dl_browse_db)
+        db_row.addWidget(self.dl_db_path, 1)
+        db_row.addWidget(btn_browse_db)
+        layout.addLayout(db_row)
+
         # Controls
         ctrl = QHBoxLayout()
         self.dl_btn_start = QPushButton("Start Downloads")
@@ -656,6 +670,19 @@ class MainWindow(QMainWindow):
         self.dl_max_per.setValue(dl_cfg.get("max_per_account", 50))
 
         return w
+
+    def _on_dl_browse_db(self):
+        from ..db.models import DB_PATH
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Database", str(DB_PATH.parent), "SQLite (*.db *.sqlite);;All (*)"
+        )
+        if path:
+            self.dl_db_path.setText(path)
+            self.dl_db_path.setStyleSheet("color: #080;")
+            # Switch coordinator's repo to this DB
+            from ..db.repository import Repository
+            self.coordinator.dl_repo = Repository(db_path=path)
+            self.dl_log.appendPlainText(f"Database: {path}")
 
     def _on_start_downloads(self):
         # Save downloader config

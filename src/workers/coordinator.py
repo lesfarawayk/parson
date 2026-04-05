@@ -70,6 +70,7 @@ class WorkerCoordinator:
         self.dl_workers: list[BaseWorker] = []
         self._dl_status_callback: Callable | None = None
         self._dl_running = False
+        self.dl_repo: Repository | None = None  # optional separate DB for downloads
 
     def set_status_callback(self, cb: Callable):
         self._status_callback = cb
@@ -251,14 +252,16 @@ class WorkerCoordinator:
             return
         self._dl_running = True
 
+        repo = self.dl_repo or self.repo
+
         # Release stuck DOWNLOADING entries from previous run
-        released = self.repo.release_downloading()
+        released = repo.release_downloading()
         if released:
             log.info(f"Released {released} stuck DOWNLOADING torrents")
 
         for i in range(worker_count):
             wid = f"dl-{i}"
-            w = DownloadWorker(wid, self.repo, proxy=self._get_proxy(i))
+            w = DownloadWorker(wid, repo, proxy=self._get_proxy(i))
             if self._dl_status_callback:
                 w.add_status_callback(self._dl_status_callback)
             self.dl_workers.append(w)
@@ -281,7 +284,8 @@ class WorkerCoordinator:
 
     def get_download_stats(self) -> dict:
         """Stats for the download tab."""
-        stats = self.repo.get_download_stats()
+        repo = self.dl_repo or self.repo
+        stats = repo.get_download_stats()
         # Aggregate from workers
         agg = {"downloaded": 0, "errors": 0}
         for w in self.dl_workers:
