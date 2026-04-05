@@ -11,13 +11,11 @@ from .models import (
     AccountStatus, TorrentStatus, init_db,
 )
 
-_lock = threading.Lock()
-
-
 class Repository:
     def __init__(self, db_path: str = ""):
         self.engine = init_db(db_path=db_path or "")
         self._SessionFactory = sessionmaker(bind=self.engine, expire_on_commit=False)
+        self._lock = threading.Lock()
 
     @contextmanager
     def _session(self):
@@ -31,7 +29,7 @@ class Repository:
     # ── Email Accounts ──────────────────────────────────────────
 
     def add_email(self, email: str, password: str) -> EmailAccount:
-        with _lock, self._session() as s:
+        with self._lock, self._session() as s:
             acc = EmailAccount(email=email, password=password, status=AccountStatus.FRESH)
             s.add(acc)
             s.commit()
@@ -40,7 +38,7 @@ class Repository:
 
     def get_fresh_email(self) -> EmailAccount | None:
         """Take one fresh email and mark it IN_USE. Skips blocked domains."""
-        with _lock, self._session() as s:
+        with self._lock, self._session() as s:
             blocked = {d.domain for d in s.query(BlockedDomain).all()}
             for acc in s.query(EmailAccount).filter(EmailAccount.status == AccountStatus.FRESH).all():
                 domain = acc.email.split("@")[1].lower() if "@" in acc.email else ""
@@ -57,14 +55,14 @@ class Repository:
 
     def get_first_email(self) -> EmailAccount | None:
         """Get the first email without changing its status. For shared mode."""
-        with _lock, self._session() as s:
+        with self._lock, self._session() as s:
             acc = s.query(EmailAccount).order_by(EmailAccount.id).first()
             if acc:
                 s.expunge(acc)
             return acc
 
     def mark_email_used(self, email_id: int):
-        with _lock, self._session() as s:
+        with self._lock, self._session() as s:
             acc = s.query(EmailAccount).get(email_id)
             if acc:
                 acc.status = AccountStatus.EXHAUSTED
@@ -74,7 +72,7 @@ class Repository:
         """Bulk import emails. Returns (added, skipped_blocked)."""
         added = 0
         skipped_blocked = 0
-        with _lock, self._session() as s:
+        with self._lock, self._session() as s:
             blocked = {d.domain for d in s.query(BlockedDomain).all()}
             for line in lines:
                 line = line.strip()
@@ -98,7 +96,7 @@ class Repository:
         return added, skipped_blocked
 
     def get_all_emails(self) -> list[dict]:
-        with _lock, self._session() as s:
+        with self._lock, self._session() as s:
             emails = s.query(EmailAccount).order_by(EmailAccount.id).all()
             return [
                 {
@@ -111,7 +109,7 @@ class Repository:
             ]
 
     def clear_all_emails(self) -> int:
-        with _lock, self._session() as s:
+        with self._lock, self._session() as s:
             count = s.query(EmailAccount).count()
             s.query(EmailAccount).delete()
             s.commit()
@@ -121,7 +119,7 @@ class Repository:
 
     def add_blocked_domain(self, domain: str, reason: str = "") -> bool:
         domain = domain.lower().strip()
-        with _lock, self._session() as s:
+        with self._lock, self._session() as s:
             if s.query(BlockedDomain).filter(BlockedDomain.domain == domain).first():
                 return False
             s.add(BlockedDomain(domain=domain, reason=reason))
@@ -134,14 +132,14 @@ class Repository:
 
     def remove_blocked_domain(self, domain: str):
         domain = domain.lower().strip()
-        with _lock, self._session() as s:
+        with self._lock, self._session() as s:
             d = s.query(BlockedDomain).filter(BlockedDomain.domain == domain).first()
             if d:
                 s.delete(d)
                 s.commit()
 
     def get_blocked_domains(self) -> list[dict]:
-        with _lock, self._session() as s:
+        with self._lock, self._session() as s:
             rows = s.query(BlockedDomain).order_by(BlockedDomain.blocked_at.desc()).all()
             return [
                 {"domain": d.domain, "reason": d.reason or "", "blocked_at": str(d.blocked_at)}
@@ -151,7 +149,7 @@ class Repository:
     # ── Tracker Accounts ────────────────────────────────────────
 
     def add_tracker_account(self, username: str, password: str, email_id: int) -> TrackerAccount:
-        with _lock, self._session() as s:
+        with self._lock, self._session() as s:
             acc = TrackerAccount(
                 username=username, password=password,
                 email_id=email_id, status=AccountStatus.FRESH
@@ -162,7 +160,7 @@ class Repository:
             return acc
 
     def get_fresh_tracker_account(self) -> TrackerAccount | None:
-        with _lock, self._session() as s:
+        with self._lock, self._session() as s:
             acc = s.query(TrackerAccount).filter(
                 TrackerAccount.status == AccountStatus.FRESH
             ).first()
@@ -173,7 +171,7 @@ class Repository:
             return acc
 
     def increment_download(self, account_id: int) -> bool:
-        with _lock, self._session() as s:
+        with self._lock, self._session() as s:
             acc = s.query(TrackerAccount).get(account_id)
             if not acc:
                 return False
@@ -184,7 +182,7 @@ class Repository:
             return acc.downloads_count < acc.max_downloads
 
     def exhaust_tracker_account(self, account_id: int):
-        with _lock, self._session() as s:
+        with self._lock, self._session() as s:
             acc = s.query(TrackerAccount).get(account_id)
             if acc:
                 acc.status = AccountStatus.EXHAUSTED
@@ -194,7 +192,7 @@ class Repository:
 
     def release_stale_claims(self):
         """Release all in-progress (uncompleted) page claims from previous runs."""
-        with _lock, self._session() as s:
+        with self._lock, self._session() as s:
             stale = s.query(PageProgress).filter(
                 and_(PageProgress.is_completed == False, PageProgress.worker_id != None)
             ).all()
@@ -206,7 +204,7 @@ class Repository:
             return count
 
     def claim_next_page(self, category_id: str, worker_id: str) -> int | None:
-        with _lock, self._session() as s:
+        with self._lock, self._session() as s:
             existing = s.query(PageProgress).filter(
                 and_(
                     PageProgress.category_id == category_id,
@@ -243,7 +241,7 @@ class Repository:
             return None
 
     def complete_page(self, category_id: str, page_number: int, worker_id: str):
-        with _lock, self._session() as s:
+        with self._lock, self._session() as s:
             progress = s.query(PageProgress).filter(
                 and_(
                     PageProgress.category_id == category_id,
@@ -257,7 +255,7 @@ class Repository:
                 s.commit()
 
     def release_page(self, category_id: str, worker_id: str):
-        with _lock, self._session() as s:
+        with self._lock, self._session() as s:
             pages = s.query(PageProgress).filter(
                 and_(
                     PageProgress.category_id == category_id,
@@ -271,7 +269,7 @@ class Repository:
 
     def get_page_statuses(self, category_id: str) -> dict[int, str]:
         """Returns {page_number: 'completed'|'in_progress'} for all tracked pages."""
-        with _lock, self._session() as s:
+        with self._lock, self._session() as s:
             rows = s.query(PageProgress).filter(
                 PageProgress.category_id == category_id
             ).all()
@@ -285,7 +283,7 @@ class Repository:
 
     def clear_page_progress(self, category_id: str) -> int:
         """Clear all page progress for a category. Returns count deleted."""
-        with _lock, self._session() as s:
+        with self._lock, self._session() as s:
             count = s.query(PageProgress).filter(
                 PageProgress.category_id == category_id
             ).delete()
@@ -295,12 +293,12 @@ class Repository:
     # ── Torrents ────────────────────────────────────────────────
 
     def torrent_exists(self, topic_id: str) -> bool:
-        with _lock, self._session() as s:
+        with self._lock, self._session() as s:
             return s.query(Torrent).filter(Torrent.topic_id == topic_id).first() is not None
 
     def save_torrent_data(self, data: dict) -> Torrent | None:
         """Save fully parsed torrent data. Skips duplicates."""
-        with _lock, self._session() as s:
+        with self._lock, self._session() as s:
             if s.query(Torrent).filter(Torrent.topic_id == data["topic_id"]).first():
                 return None
             t = Torrent(
@@ -332,7 +330,7 @@ class Repository:
             return t
 
     def get_all_torrents(self, status_filter: str = "", limit: int = 500) -> list[dict]:
-        with _lock, self._session() as s:
+        with self._lock, self._session() as s:
             q = s.query(Torrent).order_by(Torrent.id.desc())
             if status_filter:
                 try:
@@ -365,13 +363,13 @@ class Repository:
 
     def get_cover_data(self, topic_id: str) -> bytes | None:
         """Get cover image bytes for a single torrent."""
-        with _lock, self._session() as s:
+        with self._lock, self._session() as s:
             t = s.query(Torrent).filter(Torrent.topic_id == topic_id).first()
             return t.cover_data if t else None
 
     def claim_torrent_for_download(self, worker_id: str) -> dict | None:
         """Claim a torrent that has download_url but no torrent_file. Returns dict or None."""
-        with _lock, self._session() as s:
+        with self._lock, self._session() as s:
             t = s.query(Torrent).filter(
                 and_(
                     Torrent.download_url != None,
@@ -395,7 +393,7 @@ class Repository:
 
     def save_torrent_file(self, topic_id: str, data: bytes):
         """Save downloaded .torrent file bytes and mark as DOWNLOADED."""
-        with _lock, self._session() as s:
+        with self._lock, self._session() as s:
             t = s.query(Torrent).filter(Torrent.topic_id == topic_id).first()
             if t:
                 t.torrent_file = data
@@ -405,7 +403,7 @@ class Repository:
 
     def release_downloading(self, worker_id: str = ""):
         """Release all DOWNLOADING torrents back to PARSED (for restart)."""
-        with _lock, self._session() as s:
+        with self._lock, self._session() as s:
             rows = s.query(Torrent).filter(Torrent.status == TorrentStatus.DOWNLOADING).all()
             count = len(rows)
             for t in rows:
@@ -416,7 +414,7 @@ class Repository:
 
     def get_download_stats(self) -> dict:
         """Stats for the download tab."""
-        with _lock, self._session() as s:
+        with self._lock, self._session() as s:
             total_with_url = s.query(Torrent).filter(
                 and_(Torrent.download_url != None, Torrent.download_url != "")
             ).count()
@@ -435,7 +433,7 @@ class Repository:
             }
 
     def update_torrent_status(self, topic_id: str, new_status: str):
-        with _lock, self._session() as s:
+        with self._lock, self._session() as s:
             t = s.query(Torrent).filter(Torrent.topic_id == topic_id).first()
             if t:
                 try:
@@ -445,7 +443,7 @@ class Repository:
                     pass
 
     def clear_all_torrents(self) -> int:
-        with _lock, self._session() as s:
+        with self._lock, self._session() as s:
             count = s.query(Torrent).count()
             s.query(Torrent).delete()
             s.query(PageProgress).delete()
@@ -453,14 +451,14 @@ class Repository:
             return count
 
     def mark_torrent_error(self, topic_id: str):
-        with _lock, self._session() as s:
+        with self._lock, self._session() as s:
             t = s.query(Torrent).filter(Torrent.topic_id == topic_id).first()
             if t:
                 t.status = TorrentStatus.ERROR
                 s.commit()
 
     def get_stats(self) -> dict:
-        with _lock, self._session() as s:
+        with self._lock, self._session() as s:
             from ..config_manager import load_config
             cfg = load_config()
             pages_start = cfg["tracker"]["pages_start"]

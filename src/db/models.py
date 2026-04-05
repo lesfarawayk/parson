@@ -129,6 +129,11 @@ def init_db(db_path: str = ""):
 
     from sqlalchemy import text
 
+    # Enable WAL mode for better concurrent read/write performance
+    with engine.connect() as conn:
+        conn.execute(text("PRAGMA journal_mode=WAL"))
+        conn.commit()
+
     with engine.connect() as conn:
         try:
             cols = [row[1] for row in conn.execute(text("PRAGMA table_info(torrents)"))]
