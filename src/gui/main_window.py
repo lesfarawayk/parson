@@ -820,14 +820,26 @@ class MainWindow(QMainWindow):
 
 
 class QtLogHandler(logging.Handler):
-    """Logging handler that writes to a QPlainTextEdit."""
+    """Thread-safe logging handler that writes to a QPlainTextEdit via signal."""
     def __init__(self, text_widget: QPlainTextEdit):
         super().__init__()
         self.text_widget = text_widget
+        self._signal = _LogSignal()
+        self._signal.message.connect(self._append)
 
-    def emit(self, record):
-        msg = self.format(record)
+    def _append(self, msg: str):
         try:
             self.text_widget.appendPlainText(msg)
         except RuntimeError:
             pass  # widget might be deleted
+
+    def emit(self, record):
+        msg = self.format(record)
+        try:
+            self._signal.message.emit(msg)
+        except RuntimeError:
+            pass
+
+
+class _LogSignal(QObject):
+    message = Signal(str)
