@@ -80,6 +80,20 @@ class DownloadWorker(BaseWorker):
 
             self._emit_status(f"Ready: {username}")
 
+            # Diagnostic: check how many torrents are available
+            dl_stats = self.repo.get_download_stats()
+            self.log.info(f"Download stats: {dl_stats}")
+            self._emit_status(
+                f"Ready: {username} | "
+                f"Pending: {dl_stats['pending']}, "
+                f"Already downloaded: {dl_stats['downloaded']}, "
+                f"Total with URL: {dl_stats['total_with_url']}"
+            )
+
+            if dl_stats["pending"] == 0 and dl_stats["downloading"] == 0:
+                self._emit_status("Nothing to download — all torrents already have .torrent files or no download URLs")
+                return
+
             max_per_account = dl_cfg.get("max_per_account", 50)
             self._download_loop(profile, max_per_account)
         finally:
@@ -106,6 +120,7 @@ class DownloadWorker(BaseWorker):
 
             item = self.repo.claim_torrent_for_download(self.worker_id)
             if not item:
+                self.log.info("claim_torrent_for_download returned None — no more items")
                 self._emit_status("No more torrents to download — done!")
                 break
 
@@ -157,7 +172,7 @@ class DownloadWorker(BaseWorker):
         else:
             url = dl_url
 
-        self.log.debug(f"GET {url}")
+        self.log.info(f"GET {url}")
         response = self.page.request.get(url)
 
         if not response.ok:
@@ -167,9 +182,9 @@ class DownloadWorker(BaseWorker):
         content_type = response.headers.get("content-type", "")
         body = response.body()
 
-        self.log.debug(
+        self.log.info(
             f"Torrent {topic_id}: status={response.status}, "
-            f"content-type={content_type}, size={len(body)}"
+            f"content-type={content_type}, size={len(body)} bytes"
         )
 
         # Check if we got HTML instead of torrent (login wall, etc.)
