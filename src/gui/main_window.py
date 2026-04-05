@@ -2,6 +2,7 @@
 
 import json
 import logging
+import threading
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTabWidget,
     QPushButton, QLabel, QTextEdit, QTableWidget, QTableWidgetItem,
@@ -35,6 +36,12 @@ class StatusSignal(QObject):
     updated = Signal(str, str, str)  # worker_id, state, message
 
 
+class _StatsSignal(QObject):
+    """Delivers stats dict from bg thread to GUI thread."""
+    main_stats = Signal(dict)
+    dl_stats = Signal(dict)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -48,10 +55,16 @@ class MainWindow(QMainWindow):
             lambda wid, state, msg: self.status_signal.updated.emit(wid, state, msg)
         )
 
+        # Stats signals — bg thread → GUI thread
+        self._stats_signal = _StatsSignal()
+        self._stats_signal.main_stats.connect(self._apply_main_stats)
+        self._stats_signal.dl_stats.connect(self._apply_dl_stats)
+        self._stats_fetching = False  # guard against overlapping fetches
+
         self._build_ui()
         self._load_config_to_ui()
 
-        # Periodic stats refresh
+        # Periodic stats refresh (runs DB queries in background thread)
         self.stats_timer = QTimer(self)
         self.stats_timer.timeout.connect(self._refresh_stats)
         self.stats_timer.start(3000)
@@ -586,8 +599,11 @@ class MainWindow(QMainWindow):
         self.dl_db_path.setStyleSheet("color: #080;")
         btn_browse_db = QPushButton("Browse...")
         btn_browse_db.clicked.connect(self._on_dl_browse_db)
+        btn_check_db = QPushButton("Check Database")
+        btn_check_db.clicked.connect(self._on_dl_check_db)
         db_row.addWidget(self.dl_db_path, 1)
         db_row.addWidget(btn_browse_db)
+        db_row.addWidget(btn_check_db)
         layout.addLayout(db_row)
 
         # Controls
@@ -684,6 +700,31 @@ class MainWindow(QMainWindow):
             self.coordinator.dl_repo = Repository(db_path=path)
             self.dl_log.appendPlainText(f"Database: {path}")
 
+    def _on_dl_check_db(self):
+        """Check the selected database and show download stats without starting workers."""
+        db_path = self.dl_db_path.text()
+        if not db_path:
+            self.dl_stats_label.setText("No database selected!")
+            return
+
+        def _bg():
+            try:
+                from ..db.repository import Repository
+                repo = Repository(db_path=db_path)
+                stats = repo.get_download_stats()
+                self._stats_signal.dl_stats.emit(stats)
+                # Also update the coordinator's dl_repo so it's ready
+                self.coordinator.dl_repo = repo
+            except Exception as e:
+                self._stats_signal.dl_stats.emit({
+                    "total_with_url": 0, "downloaded": 0,
+                    "downloading": 0, "pending": 0,
+                    "error": str(e),
+                })
+
+        self.dl_stats_label.setText("Checking database...")
+        threading.Thread(target=_bg, daemon=True).start()
+
     def _on_start_downloads(self):
         # Save downloader config
         cfg = load_config()
@@ -728,10 +769,15 @@ class MainWindow(QMainWindow):
         self.dl_workers_table.setItem(row, 2, QTableWidgetItem(message))
 
     def _refresh_dl_stats(self):
-        if not self.coordinator.is_dl_running:
-            return
+        """DL stats now come via _apply_dl_stats signal from bg thread."""
+        pass
+
+    def _apply_dl_stats(self, stats: dict):
+        """Apply download stats on the GUI thread (called via signal)."""
         try:
-            stats = self.coordinator.get_download_stats()
+            if "error" in stats:
+                self.dl_stats_label.setText(f"DB Error: {stats['error']}")
+                return
             total = stats["total_with_url"]
             downloaded = stats["downloaded"]
             pending = stats["pending"]
@@ -1025,10 +1071,31 @@ class MainWindow(QMainWindow):
         self.workers_table.setItem(row, 2, QTableWidgetItem(message))
 
     def _refresh_stats(self):
-        if not self.coordinator.is_running:
+        """Kick off stats fetch in a background thread (never blocks GUI)."""
+        if self._stats_fetching:
+            return  # previous fetch still running
+        running_main = self.coordinator.is_running
+        running_dl = self.coordinator.is_dl_running
+        if not running_main and not running_dl:
             return
+        self._stats_fetching = True
+
+        def _bg():
+            try:
+                if running_main:
+                    self._stats_signal.main_stats.emit(self.coordinator.get_stats())
+                if running_dl:
+                    self._stats_signal.dl_stats.emit(self.coordinator.get_download_stats())
+            except Exception:
+                pass
+            finally:
+                self._stats_fetching = False
+
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _apply_main_stats(self, stats: dict):
+        """Apply main parser stats on the GUI thread (called via signal)."""
         try:
-            stats = self.coordinator.get_stats()
             pages_done = stats['pages_completed']
             pages_wip = stats.get('pages_in_progress', 0)
             pages_total = stats.get('pages_total', 0)
@@ -1052,7 +1119,6 @@ class MainWindow(QMainWindow):
             )
             self.lbl_stats.setText(text)
 
-            # Update page progress bar
             self.page_progress.setMaximum(max(pages_total, 1))
             self.page_progress.setValue(pages_done)
             self.lbl_pages.setText(
@@ -1061,7 +1127,6 @@ class MainWindow(QMainWindow):
                 + f"  —  ETA: {eta_str}"
             )
 
-            # Auto-refresh tables every cycle
             self._refresh_email_table()
             self._refresh_blocked_table()
             self._refresh_db_table()

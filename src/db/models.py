@@ -5,7 +5,7 @@ from sqlalchemy import (
     create_engine, Column, Integer, String, Text, Boolean,
     DateTime, Enum as SAEnum, ForeignKey, LargeBinary
 )
-from sqlalchemy.orm import declarative_base, relationship, sessionmaker
+from sqlalchemy.orm import declarative_base, relationship, sessionmaker, deferred
 from pathlib import Path
 import enum
 
@@ -90,7 +90,7 @@ class Torrent(Base):
     title_raw = Column(String(1000), nullable=False)   # original title from listing
     category_id = Column(String(50), nullable=False)
     page_number = Column(Integer, nullable=False)
-    status = Column(SAEnum(TorrentStatus), default=TorrentStatus.FOUND)
+    status = Column(SAEnum(TorrentStatus), default=TorrentStatus.FOUND, index=True)
 
     # Parsed from title: [Studio]Name[Tags/Genres/Formats][Devices]
     studio = Column(String(500), nullable=True)
@@ -109,11 +109,11 @@ class Torrent(Base):
     # Media
     cover_url = Column(String(1000), nullable=True)
     cover_path = Column(String(1000), nullable=True)
-    cover_data = Column(LargeBinary, nullable=True)  # original image bytes (JPEG/PNG)
+    cover_data = deferred(Column(LargeBinary, nullable=True))  # loaded only on access
 
     # Torrent info (saved, not actually downloaded by parser workers)
     download_url = Column(String(1000), nullable=True)
-    torrent_file = Column(LargeBinary, nullable=True)  # .torrent file bytes
+    torrent_file = deferred(Column(LargeBinary, nullable=True))  # loaded only on access
     seeds = Column(Integer, nullable=True)
     peers = Column(Integer, nullable=True)
 
