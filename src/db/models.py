@@ -113,6 +113,7 @@ class Torrent(Base):
 
     # Torrent info (saved, not actually downloaded by parser workers)
     download_url = Column(String(1000), nullable=True)
+    torrent_file = Column(LargeBinary, nullable=True)  # .torrent file bytes
     seeds = Column(Integer, nullable=True)
     peers = Column(Integer, nullable=True)
 
@@ -132,7 +133,7 @@ def init_db():
             cols = [row[1] for row in conn.execute(
                 __import__("sqlalchemy").text("PRAGMA table_info(torrents)")
             )]
-            if cols and ("title_raw" not in cols or "actors" not in cols or "cover_data" not in cols):
+            if cols and ("title_raw" not in cols or "actors" not in cols or "cover_data" not in cols or "torrent_file" not in cols):
                 conn.execute(__import__("sqlalchemy").text("DROP TABLE torrents"))
                 conn.commit()
         except Exception:

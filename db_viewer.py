@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QFileDialog, QMessageBox, QAbstractItemView,
 )
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QPixmap, QFont
+from PySide6.QtGui import QColor, QPixmap, QFont, QClipboard
 
 DB_DEFAULT = Path(__file__).resolve().parent / "data" / "parson.db"
 
@@ -36,6 +36,9 @@ COLUMNS = [
     ("seeds", "Seeds", 50),
     ("peers", "Peers", 50),
     ("status", "Status", 70),
+    ("download_url", "Download URL", 150),
+    ("description", "Description", 200),
+    ("has_torrent", ".torrent", 55),
 ]
 
 STATUS_COLORS = {
@@ -191,6 +194,8 @@ class DBEditor(QMainWindow):
         detail_layout = QHBoxLayout(detail_w)
         detail_layout.setContentsMargins(4, 4, 4, 4)
 
+        # Left: cover + action buttons
+        left_panel = QVBoxLayout()
         self.cover_label = QLabel()
         self.cover_label.setFixedSize(180, 240)
         self.cover_label.setAlignment(Qt.AlignCenter)
@@ -198,7 +203,22 @@ class DBEditor(QMainWindow):
             "background: #222; border: 1px solid #555; color: #888; font-size: 11px;"
         )
         self.cover_label.setText("No cover")
-        detail_layout.addWidget(self.cover_label)
+        left_panel.addWidget(self.cover_label)
+
+        btn_copy_desc = QPushButton("Copy Description")
+        btn_copy_desc.clicked.connect(self._on_copy_description)
+        left_panel.addWidget(btn_copy_desc)
+
+        btn_copy_url = QPushButton("Copy Download URL")
+        btn_copy_url.clicked.connect(self._on_copy_download_url)
+        left_panel.addWidget(btn_copy_url)
+
+        btn_save_torrent = QPushButton("Save .torrent")
+        btn_save_torrent.clicked.connect(self._on_save_torrent_file)
+        left_panel.addWidget(btn_save_torrent)
+
+        left_panel.addStretch()
+        detail_layout.addLayout(left_panel)
 
         self.detail_text = QPlainTextEdit()
         self.detail_text.setReadOnly(True)
@@ -208,7 +228,7 @@ class DBEditor(QMainWindow):
         detail_layout.addWidget(self.detail_text, 1)
 
         splitter.addWidget(detail_w)
-        splitter.setSizes([500, 200])
+        splitter.setSizes([500, 280])
         root.addWidget(splitter)
 
     # ── DB operations ──────────────────────────────────────────
@@ -286,35 +306,45 @@ class DBEditor(QMainWindow):
 
         for row_idx, r in enumerate(rows):
             for col_idx, (key, _, _) in enumerate(COLUMNS):
-                raw = r.get(key, "")
-                if raw is None:
-                    raw = ""
-
-                # Pretty-print JSON columns
-                if key in ("formats", "tags", "devices", "actors"):
-                    text = _json_pretty(str(raw))
-                else:
-                    text = str(raw)
-
-                # Create sortable items for numeric/special columns
-                if key in ("id", "seeds", "peers"):
-                    try:
-                        sort_val = int(raw) if raw else 0
-                    except (ValueError, TypeError):
-                        sort_val = 0
-                    item = SortableItem(text, sort_val)
-                elif key == "file_size":
-                    item = SortableItem(text, _parse_size_bytes(text))
-                elif key == "duration":
-                    item = SortableItem(text, _parse_duration_seconds(text))
-                elif key == "year":
-                    try:
-                        sort_val = int(raw) if raw else 0
-                    except (ValueError, TypeError):
-                        sort_val = 0
-                    item = SortableItem(text, sort_val)
-                else:
+                # Virtual column: has_torrent
+                if key == "has_torrent":
+                    tf = r.get("torrent_file")
+                    text = "Yes" if (tf and isinstance(tf, (bytes, bytearray)) and len(tf) > 0) else ""
                     item = QTableWidgetItem(text)
+                    if text:
+                        item.setBackground(QColor(180, 255, 180))
+                elif key == "description":
+                    raw_desc = str(r.get("description", "") or "")
+                    text = raw_desc[:80].replace("\n", " ") + ("..." if len(raw_desc) > 80 else "")
+                    item = QTableWidgetItem(text)
+                else:
+                    raw = r.get(key, "")
+                    if raw is None:
+                        raw = ""
+
+                    if key in ("formats", "tags", "devices", "actors"):
+                        text = _json_pretty(str(raw))
+                    else:
+                        text = str(raw)
+
+                    if key in ("id", "seeds", "peers"):
+                        try:
+                            sort_val = int(raw) if raw else 0
+                        except (ValueError, TypeError):
+                            sort_val = 0
+                        item = SortableItem(text, sort_val)
+                    elif key == "file_size":
+                        item = SortableItem(text, _parse_size_bytes(text))
+                    elif key == "duration":
+                        item = SortableItem(text, _parse_duration_seconds(text))
+                    elif key == "year":
+                        try:
+                            sort_val = int(raw) if raw else 0
+                        except (ValueError, TypeError):
+                            sort_val = 0
+                        item = SortableItem(text, sort_val)
+                    else:
+                        item = QTableWidgetItem(text)
 
                 color = STATUS_COLORS.get(str(r.get("status", "")))
                 if color:
@@ -392,6 +422,58 @@ class DBEditor(QMainWindow):
             str(r.get("description", ""))[:2000],
         ]
         self.detail_text.setPlainText("\n".join(lines))
+
+    # ── Clipboard / export ─────────────────────────────────────
+
+    def _get_selected_row_data(self) -> dict | None:
+        row = self.table.currentRow()
+        if row < 0:
+            return None
+        topic_item = self.table.item(row, 1)
+        if not topic_item or not hasattr(self, "_rows_by_id"):
+            return None
+        return self._rows_by_id.get(topic_item.text())
+
+    def _on_copy_description(self):
+        r = self._get_selected_row_data()
+        if not r:
+            QMessageBox.information(self, "Info", "Select a row first.")
+            return
+        desc = str(r.get("description", "") or "")
+        if not desc:
+            QMessageBox.information(self, "Info", "No description for this entry.")
+            return
+        QApplication.clipboard().setText(desc)
+        self.statusBar().showMessage(f"Description copied ({len(desc)} chars)", 3000)
+
+    def _on_copy_download_url(self):
+        r = self._get_selected_row_data()
+        if not r:
+            QMessageBox.information(self, "Info", "Select a row first.")
+            return
+        url = str(r.get("download_url", "") or "")
+        if not url:
+            QMessageBox.information(self, "Info", "No download URL for this entry.")
+            return
+        QApplication.clipboard().setText(url)
+        self.statusBar().showMessage(f"Download URL copied", 3000)
+
+    def _on_save_torrent_file(self):
+        r = self._get_selected_row_data()
+        if not r:
+            QMessageBox.information(self, "Info", "Select a row first.")
+            return
+        tf = r.get("torrent_file")
+        if not tf or not isinstance(tf, (bytes, bytearray)) or len(tf) == 0:
+            QMessageBox.information(self, "Info", "No .torrent file stored for this entry.")
+            return
+        topic_id = r.get("topic_id", "unknown")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save .torrent", f"{topic_id}.torrent", "Torrent files (*.torrent)"
+        )
+        if path:
+            Path(path).write_bytes(tf)
+            self.statusBar().showMessage(f"Saved: {path}", 3000)
 
     # ── Edit operations ───────────────────────────────────────
 
