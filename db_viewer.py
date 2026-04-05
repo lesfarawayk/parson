@@ -253,19 +253,32 @@ class DBEditor(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Cannot open database:\n{e}")
 
+    def _get_light_columns(self) -> str:
+        """Column list for main query — excludes heavy BLOBs."""
+        try:
+            cur = self.conn.execute("PRAGMA table_info(torrents)")
+            all_cols = [row[1] for row in cur.fetchall()]
+            skip = {"cover_data", "torrent_file"}
+            cols = [c for c in all_cols if c not in skip]
+            # Add virtual has_torrent flag: 1 if torrent_file is not null and length > 0
+            return ", ".join(cols) + ", (torrent_file IS NOT NULL AND length(torrent_file) > 0) AS has_torrent_flag"
+        except Exception:
+            return "*"
+
     def _load_data(self):
         if not self.conn:
             return
         status = self.filter_status.currentData()
+        cols = self._get_light_columns()
         try:
             if status:
                 cur = self.conn.execute(
-                    "SELECT * FROM torrents WHERE status = ? ORDER BY id DESC",
+                    f"SELECT {cols} FROM torrents WHERE status = ? ORDER BY id DESC",
                     (status,),
                 )
             else:
                 cur = self.conn.execute(
-                    "SELECT * FROM torrents ORDER BY id DESC"
+                    f"SELECT {cols} FROM torrents ORDER BY id DESC"
                 )
             rows = cur.fetchall()
             col_names = [desc[0] for desc in cur.description]
@@ -308,8 +321,7 @@ class DBEditor(QMainWindow):
             for col_idx, (key, _, _) in enumerate(COLUMNS):
                 # Virtual column: has_torrent
                 if key == "has_torrent":
-                    tf = r.get("torrent_file")
-                    text = "Yes" if (tf and isinstance(tf, (bytes, bytearray)) and len(tf) > 0) else ""
+                    text = "Yes" if r.get("has_torrent_flag") else ""
                     item = QTableWidgetItem(text)
                     if text:
                         item.setBackground(QColor(180, 255, 180))
@@ -366,17 +378,26 @@ class DBEditor(QMainWindow):
             self.detail_text.clear()
             return
 
-        # Cover image — try BLOB from DB first, fallback to file path
+        # Cover image — load BLOB from DB on demand, fallback to file path
         cover_loaded = False
-        cover_data = r.get("cover_data")
-        if cover_data and isinstance(cover_data, (bytes, bytearray)):
-            pix = QPixmap()
-            pix.loadFromData(cover_data)
-            if not pix.isNull():
-                self.cover_label.setPixmap(
-                    pix.scaled(180, 240, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        if self.conn:
+            try:
+                cur = self.conn.execute(
+                    "SELECT cover_data FROM torrents WHERE topic_id = ?",
+                    (r.get("topic_id", ""),)
                 )
-                cover_loaded = True
+                row_data = cur.fetchone()
+                cover_data = row_data[0] if row_data else None
+                if cover_data and isinstance(cover_data, (bytes, bytearray)):
+                    pix = QPixmap()
+                    pix.loadFromData(cover_data)
+                    if not pix.isNull():
+                        self.cover_label.setPixmap(
+                            pix.scaled(180, 240, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                        )
+                        cover_loaded = True
+            except Exception:
+                pass
 
         if not cover_loaded:
             cover_path = r.get("cover_path", "")
@@ -463,11 +484,21 @@ class DBEditor(QMainWindow):
         if not r:
             QMessageBox.information(self, "Info", "Select a row first.")
             return
-        tf = r.get("torrent_file")
+        topic_id = r.get("topic_id", "unknown")
+        # Load torrent_file BLOB on demand
+        tf = None
+        if self.conn:
+            try:
+                cur = self.conn.execute(
+                    "SELECT torrent_file FROM torrents WHERE topic_id = ?", (topic_id,)
+                )
+                row_data = cur.fetchone()
+                tf = row_data[0] if row_data else None
+            except Exception:
+                pass
         if not tf or not isinstance(tf, (bytes, bytearray)) or len(tf) == 0:
             QMessageBox.information(self, "Info", "No .torrent file stored for this entry.")
             return
-        topic_id = r.get("topic_id", "unknown")
         path, _ = QFileDialog.getSaveFileName(
             self, "Save .torrent", f"{topic_id}.torrent", "Torrent files (*.torrent)"
         )
