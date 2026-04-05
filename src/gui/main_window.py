@@ -9,8 +9,8 @@ from PySide6.QtWidgets import (
     QHeaderView, QSplitter, QMessageBox, QPlainTextEdit, QScrollArea, QCheckBox,
     QProgressBar,
 )
-from PySide6.QtCore import Qt, QTimer, Signal, QObject
-from PySide6.QtGui import QColor, QPixmap
+from PySide6.QtCore import Qt, QTimer, Signal, QObject, QRect
+from PySide6.QtGui import QColor, QPixmap, QPainter, QBrush, QPen, QFont as QGuiFont
 
 from ..workers.coordinator import WorkerCoordinator
 from ..config_manager import load_config, save_config
@@ -87,6 +87,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._build_database_tab(), "Database")
         tabs.addTab(self._build_emails_tab(), "Emails")
         tabs.addTab(self._build_blocked_domains_tab(), "Blocked Domains")
+        tabs.addTab(self._build_pages_tab(), "Pages")
         tabs.addTab(self._build_config_tab(), "Settings")
         tabs.addTab(self._build_log_tab(), "Log")
         layout.addWidget(tabs)
@@ -489,6 +490,85 @@ class MainWindow(QMainWindow):
             self.coordinator.repo.remove_blocked_domain(domain)
             self._refresh_blocked_table()
 
+    # ── Pages tab ──────────────────────────────────────────────
+
+    def _build_pages_tab(self) -> QWidget:
+        w = QWidget()
+        layout = QVBoxLayout(w)
+
+        # Top bar
+        top = QHBoxLayout()
+        self.pages_info_label = QLabel("—")
+        btn_refresh = QPushButton("Refresh")
+        btn_refresh.clicked.connect(self._refresh_pages_grid)
+        btn_clear = QPushButton("Clear Page Progress")
+        btn_clear.clicked.connect(self._on_clear_pages)
+
+        top.addWidget(self.pages_info_label, 1)
+        top.addWidget(btn_refresh)
+        top.addWidget(btn_clear)
+        layout.addLayout(top)
+
+        # Legend
+        legend = QHBoxLayout()
+        for color, label in [("#1e1e1e", "Pending"), ("#00c800", "Done"), ("#dcc800", "Scanning")]:
+            box = QLabel()
+            box.setFixedSize(14, 14)
+            box.setStyleSheet(f"background: {color}; border: 1px solid #444;")
+            legend.addWidget(box)
+            legend.addWidget(QLabel(label))
+        legend.addStretch()
+        layout.addLayout(legend)
+
+        # Grid inside scroll area
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        self.page_grid = PageGridWidget()
+        scroll.setWidget(self.page_grid)
+        scroll.setStyleSheet("background: #111;")
+        layout.addWidget(scroll, 1)
+
+        self._refresh_pages_grid()
+        return w
+
+    def _refresh_pages_grid(self):
+        from ..config_manager import load_config
+        cfg = load_config()
+        start = cfg["tracker"]["pages_start"]
+        end = cfg["tracker"]["pages_end"]
+        cat = cfg["tracker"]["category_id"]
+        total = max(end - start + 1, 0)
+
+        statuses = self.coordinator.repo.get_page_statuses(cat) if cat else {}
+        completed = sum(1 for s in statuses.values() if s == "completed")
+        in_progress = sum(1 for s in statuses.values() if s == "in_progress")
+
+        self.page_grid.set_range(start, end)
+        self.page_grid.set_statuses(statuses)
+        self.pages_info_label.setText(
+            f"Pages {start}–{end} ({total} total)  |  "
+            f"Done: {completed}  |  Scanning: {in_progress}  |  "
+            f"Remaining: {total - completed - in_progress}"
+        )
+
+    def _on_clear_pages(self):
+        from ..config_manager import load_config
+        cfg = load_config()
+        cat = cfg["tracker"]["category_id"]
+        if not cat:
+            QMessageBox.warning(self, "Error", "No category ID configured.")
+            return
+        reply = QMessageBox.question(
+            self, "Clear Page Progress",
+            "Reset all page progress? Parser will re-scan all pages.\n"
+            "(Torrents in DB will NOT be deleted)",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            count = self.coordinator.repo.clear_page_progress(cat)
+            QMessageBox.information(self, "Done", f"Cleared {count} page records.")
+            self._refresh_pages_grid()
+
     # ── Config tab ──────────────────────────────────────────────
 
     def _build_config_tab(self) -> QWidget:
@@ -803,6 +883,7 @@ class MainWindow(QMainWindow):
             self._refresh_email_table()
             self._refresh_blocked_table()
             self._refresh_db_table()
+            self._refresh_pages_grid()
         except Exception:
             pass
 
@@ -817,6 +898,82 @@ class MainWindow(QMainWindow):
                 return
             self.coordinator.stop()
         event.accept()
+
+
+class PageGridWidget(QWidget):
+    """Visual grid of page squares: black=pending, green=done, yellow=in-progress."""
+
+    CELL = 18       # square size in px
+    GAP = 2         # gap between squares
+    COLS = 40       # squares per row
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._pages_start = 1
+        self._pages_end = 1
+        self._statuses: dict[int, str] = {}  # page_num -> 'completed'|'in_progress'
+        self.setMinimumHeight(50)
+        self._tooltip_page: int | None = None
+        self.setMouseTracking(True)
+
+    def set_range(self, start: int, end: int):
+        self._pages_start = start
+        self._pages_end = end
+        self._update_size()
+        self.update()
+
+    def set_statuses(self, statuses: dict[int, str]):
+        self._statuses = statuses
+        self.update()
+
+    def _update_size(self):
+        total = max(self._pages_end - self._pages_start + 1, 0)
+        rows = (total + self.COLS - 1) // self.COLS if total else 1
+        h = rows * (self.CELL + self.GAP) + self.GAP + 4
+        self.setMinimumHeight(h)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, False)
+
+        total = max(self._pages_end - self._pages_start + 1, 0)
+        completed = sum(1 for s in self._statuses.values() if s == "completed")
+
+        # Draw cells
+        for i in range(total):
+            page_num = self._pages_start + i
+            col = i % self.COLS
+            row = i // self.COLS
+            x = self.GAP + col * (self.CELL + self.GAP)
+            y = self.GAP + row * (self.CELL + self.GAP)
+
+            status = self._statuses.get(page_num, "")
+            if status == "completed":
+                painter.setBrush(QBrush(QColor(0, 200, 0)))
+            elif status == "in_progress":
+                painter.setBrush(QBrush(QColor(220, 200, 0)))
+            else:
+                painter.setBrush(QBrush(QColor(30, 30, 30)))
+
+            painter.setPen(QPen(QColor(60, 60, 60), 1))
+            painter.drawRect(x, y, self.CELL, self.CELL)
+
+        painter.end()
+
+    def mouseMoveEvent(self, event):
+        pos = event.position() if hasattr(event, 'position') else event.pos()
+        col = int((pos.x() - self.GAP) / (self.CELL + self.GAP))
+        row = int((pos.y() - self.GAP) / (self.CELL + self.GAP))
+        if col < 0 or col >= self.COLS or row < 0:
+            self.setToolTip("")
+            return
+        idx = row * self.COLS + col
+        page_num = self._pages_start + idx
+        if page_num > self._pages_end:
+            self.setToolTip("")
+            return
+        status = self._statuses.get(page_num, "pending")
+        self.setToolTip(f"Page {page_num} — {status}")
 
 
 class QtLogHandler(logging.Handler):

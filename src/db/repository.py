@@ -269,6 +269,29 @@ class Repository:
                 s.delete(p)
             s.commit()
 
+    def get_page_statuses(self, category_id: str) -> dict[int, str]:
+        """Returns {page_number: 'completed'|'in_progress'} for all tracked pages."""
+        with _lock, self._session() as s:
+            rows = s.query(PageProgress).filter(
+                PageProgress.category_id == category_id
+            ).all()
+            result = {}
+            for p in rows:
+                if p.is_completed:
+                    result[p.page_number] = "completed"
+                elif p.worker_id:
+                    result[p.page_number] = "in_progress"
+            return result
+
+    def clear_page_progress(self, category_id: str) -> int:
+        """Clear all page progress for a category. Returns count deleted."""
+        with _lock, self._session() as s:
+            count = s.query(PageProgress).filter(
+                PageProgress.category_id == category_id
+            ).delete()
+            s.commit()
+            return count
+
     # ── Torrents ────────────────────────────────────────────────
 
     def torrent_exists(self, topic_id: str) -> bool:
